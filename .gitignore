@@ -6,7 +6,7 @@
 ._*
 
 # Custom folder icons
-Icon
+Icon
 
 # Volume root files
 .DocumentRevisions-V100
@@ -113,3 +113,17 @@ htmlcov/
 
 # pyenv
 # .python-version
+
+### Project-specific
+# Local SQLite database files
+*.sqlite
+*.sqlite3
+*.db
+data/
+
+# uv
+.venv/
+uv.lock.bak
+
+# Ruff cache
+.ruff_cache/
