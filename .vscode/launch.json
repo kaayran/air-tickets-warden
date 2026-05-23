@@ -1,0 +1,32 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run bot",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "warden.main",
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "pytest: current file",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["${file}", "-vv"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "pytest: all",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-vv"],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ]
+}

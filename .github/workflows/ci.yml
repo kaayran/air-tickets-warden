@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.6.3"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Ruff (lint)
+        run: uv run ruff check .
+
+      - name: Ruff (format)
+        run: uv run ruff format --check .
+
+      - name: Mypy
+        run: uv run mypy src/warden
+
+      - name: Pytest with coverage
+        run: uv run pytest --cov=src/warden --cov-report=xml --cov-fail-under=80
