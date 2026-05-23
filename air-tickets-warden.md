@@ -8,13 +8,13 @@
 
 ## 1. Overview
 
-A Telegram bot for personal monitoring of air ticket prices from Serbia (primary airport: Belgrade, BEG) to any European country. The bot operates on a subscription model: the user creates monitoring rules (route + date range + alert conditions), and the bot regularly polls several data sources, aggregates results, maintains a price history, and sends notifications when conditions are met.
+A Telegram bot for personal monitoring of air ticket prices on any route. The bot operates on a subscription model: the user creates monitoring rules (route + date range + alert conditions), and the bot regularly polls several data sources, aggregates results, maintains a price history, and sends notifications when conditions are met.
 
 ### Key principles
 
 - **Multi-source coverage.** No single API covers the whole market (especially because of the low-cost carriers Wizz Air and Ryanair). The bot polls several sources in parallel.
 - **History matters more than the spot price.** "Cheap" is defined relative to historical data for the specific route, not against an absolute threshold.
-- **Airport flexibility.** From Belgrade it is often cheaper to fly via Budapest, Sofia, Timișoara, or Zagreb — the bot accounts for alternative departure airports.
+- **Airport flexibility.** It is often cheaper to fly from a nearby airport — the bot accounts for alternative departure airports and adds ground transfer cost for a fair comparison.
 - **Anti-spam.** The bot does not fire notifications on every minor price wiggle.
 
 ### What the bot does NOT do (out of scope for MVP)
@@ -38,8 +38,8 @@ A single person (the bot owner) or a small circle of acquaintances. Not a public
 
 ### Routes
 
-- **Origin:** Belgrade (BEG), plus nearby alternative airports — Budapest (BUD), Sofia (SOF), Timișoara (TSR), Zagreb (ZAG).
-- **Destination:** any European airport.
+- **Origin:** any airport; alternative departure airports are configurable per subscription.
+- **Destination:** any airport.
 - **Carriers that matter:** Air Serbia, Wizz Air, Ryanair, Lufthansa Group (LH/OS/LX), Turkish, easyJet, Vueling, Pegasus, AJet.
 
 ### Technology assumptions
@@ -181,12 +181,12 @@ Before dispatching requests to adapters, expands the route according to user fle
 
 - If a subscription allows alternative airports, it queues requests for each.
 - Maintains a lookup table: for each pair (primary airport, alternative airport) — the approximate cost and duration of ground transfer (bus, car).
-- At the aggregation stage, this cost is added to the ticket price for a fair comparison. For example, a ticket from Budapest at €40 + €25 transfer = an effective price of €65 vs. a €70 ticket from Belgrade — the latter is cheaper.
+- At the aggregation stage, this cost is added to the ticket price for a fair comparison. For example, a ticket from an alternative airport at a lower fare but with a €25 transfer may end up more expensive than a direct departure — the bot computes the effective price for each option.
 
-Transfer reference table (draft):
+The transfer reference table is configurable per subscription (mode, approximate cost, duration). Example entries for Belgrade (BEG):
 
-| From BG to | Mode | Price | Time |
-|------------|------|-------|------|
+| Alternative | Mode | Price | Time |
+|-------------|------|-------|------|
 | BUD | bus/car | €25–40 | ~7 h |
 | SOF | bus | €20 | ~6 h |
 | TSR | bus | €15 | ~2.5 h |
@@ -248,7 +248,7 @@ Flight {
 
 Sits between Source Adapters and Aggregator — an adapter-response cache. MVP — **`aiocache` (in-memory)**, growing into **Redis**.
 
-**Why it's needed:** with 5 alternative airports × 3 sources × N subscriptions, the same pair (BEG→BCN, 10–20 July) is queried many times per hour. Without a cache, free-tier limits burn out within a day.
+**Why it's needed:** with multiple alternative airports × 3 sources × N subscriptions, the same pair (origin→destination, date range) is queried many times per hour. Without a cache, free-tier limits burn out within a day.
 
 **Key:** `(source, origin, destination, date_from, date_to, options_hash)`.
 **TTL:** 15 minutes for high-priority subscriptions, 60 minutes for the rest. Configurable per source.
@@ -276,7 +276,7 @@ Collects results from all adapters, deduplicates, and sorts.
 
 **Special case — multi-segment flights.** Deduplication uses a composite key across all segments. If any segment differs, these are distinct itineraries.
 
-**Sorting:** by effective price (`price_eur + transfer_cost_eur`), not by raw ticket price. This way Budapest with transfer is compared to Belgrade on a level playing field.
+**Sorting:** by effective price (`price_eur + transfer_cost_eur`), not by raw ticket price. This way an alternative airport with transfer is compared to the primary departure on a level playing field.
 
 **Aggregator pipeline:**
 
@@ -458,11 +458,11 @@ class ObservabilitySettings(BaseSettings):
 
 ## 4. Data flow (end-to-end scenario)
 
-**Scenario:** the user created a subscription BEG → Barcelona (BCN), dates 10–20 July 2026, departure-airport flexibility enabled, `combined` strategy (threshold €100 OR −25% off the average).
+**Scenario:** the user created a subscription BEG → Barcelona (BCN), dates 10–20 July 2026, departure-airport flexibility enabled (BUD, SOF, TSR, ZAG as alternatives), `combined` strategy (threshold €100 OR −25% off the average).
 
 1. The Scheduler triggers a subscription check (departure ~50 days away → medium-priority, every 4 hours). A `trace_id` is assigned for end-to-end logging of the whole cycle.
 2. The Subscription Manager hands over the rule → passed to the Multi-Airport Expander.
-3. The Expander unfolds into 5 pairs: (BEG, BCN), (BUD, BCN), (SOF, BCN), (TSR, BCN), (ZAG, BCN). For each pair + date range, requests are formed.
+3. The Expander unfolds into pairs for each configured alternative: (BEG, BCN), (BUD, BCN), (SOF, BCN), (TSR, BCN), (ZAG, BCN). For each pair + date range, requests are formed.
 4. **Cache Layer** checks each key `(source, origin, destination, date_from, date_to)`. On a hit, the cached Flight list is returned. On a miss, the request continues.
 5. Miss requests are fired in parallel into the Aviasales, Kiwi, Ryanair adapters. Each adapter:
    - Respects its own rate limit (`aiolimiter`).
