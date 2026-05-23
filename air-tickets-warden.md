@@ -1,86 +1,86 @@
 # Air Tickets Warden — Design Document
 
-**Версия:** 0.2 (draft)
-**Дата:** 2026-05-23
-**Статус:** Design
+**Version:** 0.3 (draft)
+**Date:** 2026-05-23
+**Status:** Design
 
 ---
 
-## 1. Обзор
+## 1. Overview
 
-Telegram-бот для персонального мониторинга цен на авиабилеты из Сербии (основной аэропорт — Белград, BEG) в любую страну Европы. Бот работает по подписочной модели: пользователь создаёт правила мониторинга (маршрут + диапазон дат + условия алерта), а бот регулярно опрашивает несколько источников данных, агрегирует результаты, ведёт историю цен и присылает уведомления при выполнении условий.
+A Telegram bot for personal monitoring of air ticket prices from Serbia (primary airport: Belgrade, BEG) to any European country. The bot operates on a subscription model: the user creates monitoring rules (route + date range + alert conditions), and the bot regularly polls several data sources, aggregates results, maintains a price history, and sends notifications when conditions are met.
 
-### Ключевые принципы
+### Key principles
 
-- **Многоисточниковость.** Ни один отдельный API не покрывает весь рынок (особенно из-за лоукостеров Wizz Air и Ryanair). Бот опрашивает несколько источников параллельно.
-- **История важнее моментальной цены.** «Дёшево» определяется относительно исторических данных по конкретному маршруту, а не по абсолютному порогу.
-- **Гибкость по аэропортам.** Из Белграда часто выгоднее лететь через Будапешт, Софию, Тимишоару или Загреб — бот учитывает альтернативные точки вылета.
-- **Антиспам.** Бот не дёргает уведомлениями по любому шевелению цены.
+- **Multi-source coverage.** No single API covers the whole market (especially because of the low-cost carriers Wizz Air and Ryanair). The bot polls several sources in parallel.
+- **History matters more than the spot price.** "Cheap" is defined relative to historical data for the specific route, not against an absolute threshold.
+- **Airport flexibility.** From Belgrade it is often cheaper to fly via Budapest, Sofia, Timișoara, or Zagreb — the bot accounts for alternative departure airports.
+- **Anti-spam.** The bot does not fire notifications on every minor price wiggle.
 
-### Что бот НЕ делает (out of scope для MVP)
+### What the bot does NOT do (out of scope for MVP)
 
-- Не бронирует билеты автоматически (только присылает ссылки).
-- Не управляет платежами.
-- Не работает с многосегментными маршрутами на разных билетах (open-jaw, multi-city).
-- Не учитывает багаж/места в расчёте (пока).
-
----
-
-## 2. Контекст и допущения
-
-### Целевой пользователь
-
-Один человек (владелец бота) или узкий круг знакомых. Не публичный сервис, поэтому:
-
-- Не нужна авторизация по платным тарифам, биллинг, multi-tenancy.
-- Можно использовать API-ключи на минимальном/бесплатном тарифе.
-- Допустимо использовать полу-официальные API (например, эндпоинты Ryanair, которые формально не для публичного использования).
-
-### Маршруты
-
-- **Источник:** Белград (BEG), плюс альтернативные близкие аэропорты — Будапешт (BUD), София (SOF), Тимишоара (TSR), Загреб (ZAG).
-- **Назначение:** любые европейские аэропорты.
-- **Перевозчики, которые важны:** Air Serbia, Wizz Air, Ryanair, Lufthansa Group (LH/OS/LX), Turkish, easyJet, Vueling, Pegasus, AJet.
-
-### Технологические допущения
-
-- **Python 3.12+** (для совместимости с `ryanair-py` и async-экосистемой).
-- **Async-first**: aiogram 3.x, httpx, aiosqlite / asyncpg. Один event loop, без worker pool.
-- Один экземпляр бота, без horizontal scaling.
-- **SQLite (через `aiosqlite`) на MVP**, миграция на **PostgreSQL (через `asyncpg`)** при росте объёма. Миграции — Alembic с первого дня.
-- Деплой на VPS — **Hetzner Cloud (~€4–5/мес)** как референс. Railway / Fly.io возможны, но free-tier ненадёжен для 24/7 жизни.
-- Контейнеризация — **Docker + docker-compose** от MVP, упрощает миграцию и локальный dev.
-
-Полный стек с обоснованиями выбора — см. §9 «Технологический стек».
+- Does not book tickets automatically (only sends links).
+- Does not handle payments.
+- Does not work with multi-segment itineraries split across separate tickets (open-jaw, multi-city).
+- Does not factor in baggage / seat fees yet.
 
 ---
 
-## 3. Архитектура
+## 2. Context and assumptions
 
-### 3.1. Высокоуровневая схема
+### Target user
+
+A single person (the bot owner) or a small circle of acquaintances. Not a public service, therefore:
+
+- No need for paid-tier authorization, billing, or multi-tenancy.
+- API keys on minimal / free tiers are acceptable.
+- Semi-official APIs are acceptable (e.g., Ryanair endpoints that are not formally intended for public use).
+
+### Routes
+
+- **Origin:** Belgrade (BEG), plus nearby alternative airports — Budapest (BUD), Sofia (SOF), Timișoara (TSR), Zagreb (ZAG).
+- **Destination:** any European airport.
+- **Carriers that matter:** Air Serbia, Wizz Air, Ryanair, Lufthansa Group (LH/OS/LX), Turkish, easyJet, Vueling, Pegasus, AJet.
+
+### Technology assumptions
+
+- **Python 3.12+** (for compatibility with `ryanair-py` and the async ecosystem).
+- **Async-first**: aiogram 3.x, httpx, aiosqlite / asyncpg. A single event loop, no worker pool.
+- A single bot instance, no horizontal scaling.
+- **SQLite (via `aiosqlite`) for MVP**, migration to **PostgreSQL (via `asyncpg`)** when volume grows. Alembic migrations from day one.
+- Deployment on a VPS — **Hetzner Cloud (~€4–5/month)** as the reference. Railway / Fly.io are possible, but free tiers are unreliable for 24/7 operation.
+- Containerization — **Docker + docker-compose** from MVP; simplifies migration and local dev.
+
+The full stack with rationale — see §9 "Technology stack".
+
+---
+
+## 3. Architecture
+
+### 3.1. High-level diagram
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                      Telegram Bot Layer                          │
-│  (команды, inline-кнопки, форматирование уведомлений)            │
+│  (commands, inline buttons, notification formatting)             │
 └──────────────────────────┬──────────────────────────────────────┘
                            │
                            ▼
             ┌──────────────────────────┐
             │  Subscription Manager    │ ←──→  ┌──────────┐
-            │  (CRUD над правилами)    │       │   DB     │
+            │  (CRUD over rules)       │       │   DB     │
             └──────────────┬───────────┘       └──────────┘
                            │
                            ▼
             ┌──────────────────────────┐
             │      Scheduler           │
-            │  (cron + приоритеты)     │
+            │  (cron + priorities)     │
             └──────────────┬───────────┘
                            │
                            ▼
             ┌──────────────────────────┐
             │ Multi-Airport Expander   │
-            │ (расширение маршрутов)   │
+            │ (route expansion)        │
             └──────────────┬───────────┘
                            │
         ┌──────────────────┼──────────────────┐
@@ -103,7 +103,7 @@ Telegram-бот для персонального мониторинга цен 
                            ▼
             ┌──────────────────────────┐
             │     Alert Engine         │
-            │ (порог / drop / минимум) │
+            │ (threshold / drop / min) │
             └──────────────┬───────────┘
                            │
                            ▼
@@ -112,95 +112,95 @@ Telegram-бот для персонального мониторинга цен 
             └──────────────────────────┘
 ```
 
-### 3.2. Компоненты
+### 3.2. Components
 
 #### Telegram Bot Layer
 
-Входная точка пользователя. Реализуется на **`aiogram` 3.x** (async-first, встроенный FSM для пошагового диалога `/new`, Pydantic-валидация апдейтов).
+The user entry point. Implemented on **`aiogram` 3.x** (async-first, built-in FSM for the step-by-step `/new` dialog, Pydantic validation of updates).
 
-**Транспорт:** long-polling (для personal-бота это проще — нет ingress, нет TLS, идентично между локальным dev и продом). Webhook рассматривать только при росте трафика.
+**Transport:** long-polling (simpler for a personal bot — no ingress, no TLS, identical between local dev and prod). Webhook only worth considering if traffic grows.
 
-**Whitelist пользователей:** middleware на старте проверяет `chat_id` против `ALLOWED_USER_IDS` из конфига. Всё лишнее отбрасывается без ответа. Бот формально публичен в Telegram, и без фильтра случайные люди могут сжечь квоты внешних API.
+**User whitelist:** a startup middleware checks `chat_id` against `ALLOWED_USER_IDS` from the config. Anything else is dropped without a reply. The bot is formally public on Telegram, and without a filter random users can burn external API quotas.
 
-**Команды:**
+**Commands:**
 
-- `/new` — диалог создания новой подписки (откуда/куда/диапазон дат/гибкость/порог).
-- `/list` — список активных подписок с кратким статусом.
-- `/pause <id>`, `/resume <id>`, `/delete <id>` — управление подписками.
-- `/search <id>` — внеплановый ручной запуск проверки.
-- `/stats <id>` — история цен по подписке: текущий минимум, среднее, мин за 30/60 дней, тренд.
-- `/help` — справка.
+- `/new` — dialog to create a new subscription (origin/destination/date range/flexibility/threshold).
+- `/list` — list of active subscriptions with brief status.
+- `/pause <id>`, `/resume <id>`, `/delete <id>` — manage subscriptions.
+- `/search <id>` — ad-hoc manual check.
+- `/stats <id>` — price history for a subscription: current minimum, average, min over 30/60 days, trend.
+- `/help` — help text.
 
-**Inline-кнопки в уведомлениях:**
+**Inline buttons in notifications:**
 
-- «Посмотреть детали» (раскрывает сегменты, пересадки, длительность)
-- «Купить» (deep link на источник, опционально с реферальным кодом)
-- «Отключить алерт на этот маршрут»
-- «Снизить порог» / «Игнорировать на N дней»
+- "View details" (expands segments, layovers, duration)
+- "Buy" (deep link to the source, optionally with a referral code)
+- "Mute alert for this route"
+- "Lower threshold" / "Ignore for N days"
 
 #### Subscription Manager
 
-CRUD-слой над правилами мониторинга. Подписка состоит из:
+A CRUD layer over monitoring rules. A subscription consists of:
 
-| Поле | Описание |
-|------|----------|
+| Field | Description |
+|-------|-------------|
 | `id` | UUID |
-| `origin` | IATA-код основного аэропорта (например, `BEG`) |
-| `origin_alternatives` | Список альтернативных аэропортов вылета |
-| `destination` | IATA-код или список (например, `[BCN, MAD, VLC]` для Испании) |
-| `date_from`, `date_to` | Диапазон допустимых дат вылета |
-| `return_date_from`, `return_date_to` | Опционально, для round-trip |
-| `trip_length_min`, `trip_length_max` | Длительность поездки в днях (если round-trip) |
-| `max_price` | Абсолютный порог цены (опционально) |
-| `max_stops` | Максимум пересадок |
-| `max_duration_minutes` | Максимум общей длительности |
-| `airlines_whitelist`, `airlines_blacklist` | Фильтры по перевозчикам |
-| `alert_strategy` | Стратегия алерта (см. Alert Engine) |
-| `cooldown_hours` | Антиспам между уведомлениями |
+| `origin` | IATA code of the primary airport (e.g., `BEG`) |
+| `origin_alternatives` | List of alternative departure airports |
+| `destination` | IATA code or list (e.g., `[BCN, MAD, VLC]` for Spain) |
+| `date_from`, `date_to` | Allowed departure date range |
+| `return_date_from`, `return_date_to` | Optional, for round-trip |
+| `trip_length_min`, `trip_length_max` | Trip length in days (if round-trip) |
+| `max_price` | Absolute price threshold (optional) |
+| `max_stops` | Maximum number of layovers |
+| `max_duration_minutes` | Maximum total trip duration |
+| `airlines_whitelist`, `airlines_blacklist` | Carrier filters |
+| `alert_strategy` | Alert strategy (see Alert Engine) |
+| `cooldown_hours` | Anti-spam between notifications |
 | `status` | active / paused / archived |
 
 #### Scheduler
 
-Запускает задачи проверки подписок. Не уравнительный cron — приоритезация по близости дат:
+Runs subscription check jobs. Not a flat cron — prioritized by date proximity:
 
-- **High-priority** (даты вылета в пределах 14 дней) — каждый час
-- **Medium** (15-60 дней) — каждые 4 часа
-- **Low** (60+ дней) — раз в день
+- **High-priority** (departure within 14 days) — every hour
+- **Medium** (15–60 days) — every 4 hours
+- **Low** (60+ days) — once a day
 
-**Реализация:** **APScheduler 3.x** в режиме `AsyncIOScheduler`. Достаточно для одного инстанса и не тянет за собой Redis. Переход на `arq` имеет смысл, только если Redis уже появится для кэша.
+**Implementation:** **APScheduler 3.x** in `AsyncIOScheduler` mode. Sufficient for a single instance and does not pull in Redis. Moving to `arq` only makes sense if Redis appears for caching.
 
-**Rate limiting:** для каждого источника — отдельный **`aiolimiter.AsyncLimiter`** (token bucket) на уровне адаптера. Scheduler не знает про лимиты внешних API — он только триггерит задачи; разруливание квот делегируется адаптерам.
+**Rate limiting:** each source gets its own **`aiolimiter.AsyncLimiter`** (token bucket) at the adapter level. The scheduler does not know about external API limits — it only triggers jobs; quota handling is delegated to adapters.
 
-**Jittering:** при постановке задач добавляется случайный сдвиг 0–60 секунд, чтобы не пулять залпом по всем подпискам на одной минуте.
+**Jittering:** a random 0–60 second offset is added when scheduling jobs, so that all subscriptions don't fire at the same minute in a burst.
 
-**Persistence джобов:** SQLAlchemyJobStore поверх той же БД — переживает рестарт.
+**Job persistence:** SQLAlchemyJobStore over the same DB — jobs survive restart.
 
 #### Multi-Airport Expander
 
-Перед отправкой запроса в адаптеры расширяет маршрут с учётом гибкости пользователя:
+Before dispatching requests to adapters, expands the route according to user flexibility:
 
-- Если подписка разрешает альтернативные аэропорты, добавляет в очередь запросы для каждого.
-- Хранит таблицу-справочник: для каждой пары аэропортов (основной, альтернативный) — примерная стоимость и длительность наземного трансфера (автобус, машина).
-- На этапе агрегации эта стоимость прибавляется к цене билета для честного сравнения. Например, билет из Будапешта €40 + трансфер €25 = эффективная цена €65 vs. билет из Белграда €70 — последний выгоднее.
+- If a subscription allows alternative airports, it queues requests for each.
+- Maintains a lookup table: for each pair (primary airport, alternative airport) — the approximate cost and duration of ground transfer (bus, car).
+- At the aggregation stage, this cost is added to the ticket price for a fair comparison. For example, a ticket from Budapest at €40 + €25 transfer = an effective price of €65 vs. a €70 ticket from Belgrade — the latter is cheaper.
 
-Справочник трансферов (черновик):
+Transfer reference table (draft):
 
-| Из БГ в | Способ | Цена | Время |
-|---------|--------|------|-------|
-| BUD | автобус/машина | €25-40 | ~7 ч |
-| SOF | автобус | €20 | ~6 ч |
-| TSR | автобус | €15 | ~2.5 ч |
-| ZAG | автобус | €30 | ~6 ч |
+| From BG to | Mode | Price | Time |
+|------------|------|-------|------|
+| BUD | bus/car | €25–40 | ~7 h |
+| SOF | bus | €20 | ~6 h |
+| TSR | bus | €15 | ~2.5 h |
+| ZAG | bus | €30 | ~6 h |
 
 #### Source Adapters
 
-Каждый источник — отдельный модуль с одинаковым интерфейсом:
+Each source is a separate module with the same interface:
 
 ```
 search(origin, destination, date_from, date_to, options) -> List[Flight]
 ```
 
-Где `Flight` — нормализованный объект:
+Where `Flight` is a normalized object:
 
 ```
 Flight {
@@ -209,10 +209,10 @@ Flight {
   currency: str
   origin: str            # IATA
   destination: str       # IATA
-  departure_at: datetime # с timezone аэропорта
+  departure_at: datetime # in the airport's timezone
   arrival_at: datetime
   segments: List[Segment]
-  airline: str           # код основного перевозчика
+  airline: str           # primary carrier code
   flight_number: str
   stops: int
   duration_minutes: int
@@ -221,185 +221,185 @@ Flight {
 }
 ```
 
-**Стартовый набор адаптеров:**
+**Initial set of adapters:**
 
-1. **Aviasales / Travelpayouts adapter** — основа. Бесплатный API, хорошо покрывает Air Serbia, классических перевозчиков, частично Wizz Air. Партнёрская программа даёт реферальные ссылки.
-2. **Kiwi (Tequila) adapter** — лучше с лоукостерами, поддерживает виртуальные пересадки (Kiwi сам стыкует рейсы разных перевозчиков, чего обычные GDS не делают). Важно для нестандартных маршрутов.
-3. **Ryanair adapter** — через библиотеку `ryanair-py`, которая использует полу-официальный эндпоинт `services-api.ryanair.com`. Покрывает только Ryanair, но критично, если этот перевозчик не виден в Aviasales.
+1. **Aviasales / Travelpayouts adapter** — the foundation. Free API, good coverage of Air Serbia, traditional carriers, partially Wizz Air. The affiliate program provides referral links.
+2. **Kiwi (Tequila) adapter** — better for low-cost carriers, supports virtual interlining (Kiwi stitches together flights from different carriers, which traditional GDSs do not). Important for non-standard routes.
+3. **Ryanair adapter** — via the `ryanair-py` library, which uses the semi-official `services-api.ryanair.com` endpoint. Covers only Ryanair, but critical when that carrier is not visible in Aviasales.
 
-**Опциональный расширенный набор:**
+**Optional extended set:**
 
-4. **Amadeus self-service adapter** — 2000 бесплатных запросов в месяц. Резерв и дополнительная валидация цен через GDS.
-5. **Wizz Air monitoring** — через парсинг сайта или подписку на промо-рассылку (без официального API).
+4. **Amadeus self-service adapter** — 2000 free requests per month. Backup and additional price validation via GDS.
+5. **Wizz Air monitoring** — via site scraping or subscribing to promo mailings (no official API).
 
-**Стандартная реализация адаптера:**
+**Standard adapter implementation:**
 
-- HTTP-клиент — **`httpx.AsyncClient`** с persistent connection pool.
-- Retry — **`tenacity`** с экспоненциальным backoff на 429/5xx (3 попытки, jitter).
-- Rate limit — **`aiolimiter`** (token bucket), параметры из конфига на источник.
-- **Circuit breaker** — `pybreaker` (или собственный счётчик): после N последовательных провалов источник «выключается» на cooldown-период. Логируется в `api_call_log`, отдельный metric. Защищает от траты квоты и зависаний всего цикла.
-- **Sanity check на выходе адаптера:** цена < `MIN_REASONABLE_PRICE` (например, €10) или > `MAX_REASONABLE_PRICE` (€5000) → flag, не пропускаем в агрегатор, пишем в лог. Защита от «битой цены €1» и outlier-ов парсинга Wizz.
-- Каждый запрос логируется в `api_call_log` (endpoint, status, latency, остаток квоты, error).
-- Не валит общий цикл при своей ошибке — `asyncio.gather(..., return_exceptions=True)` на уровне Aggregator.
+- HTTP client — **`httpx.AsyncClient`** with a persistent connection pool.
+- Retry — **`tenacity`** with exponential backoff on 429/5xx (3 attempts, jitter).
+- Rate limit — **`aiolimiter`** (token bucket), parameters per source come from the config.
+- **Circuit breaker** — `pybreaker` (or a custom counter): after N consecutive failures a source is "tripped" for a cooldown period. Logged to `api_call_log`, separate metric. Protects against quota burn and cycle hangs.
+- **Sanity check at the adapter output:** price < `MIN_REASONABLE_PRICE` (e.g., €10) or > `MAX_REASONABLE_PRICE` (€5000) → flagged, not passed to the aggregator, written to the log. Defends against "broken €1 prices" and Wizz parsing outliers.
+- Every request is logged to `api_call_log` (endpoint, status, latency, remaining quota, error).
+- A single adapter failure does not crash the whole cycle — `asyncio.gather(..., return_exceptions=True)` at the Aggregator level.
 
-**Замечание по Kiwi Tequila:** API проходил реструктуризацию, доступ к бесплатному tier-у ограничен. **Перед закладыванием в код проверить актуальность ключей.** Альтернативы: **Duffel** (хороший API, есть test mode), **FlightAPI.io**, **SerpAPI Google Flights** (платный, но покрывает Wizz/Ryanair).
+**Note on Kiwi Tequila:** the API has been undergoing restructuring; free-tier access has been restricted. **Verify key availability before wiring it into code.** Alternatives: **Duffel** (good API, has a test mode), **FlightAPI.io**, **SerpAPI Google Flights** (paid, but covers Wizz/Ryanair).
 
 #### Cache Layer
 
-Между Source Adapters и Aggregator — кэш ответов адаптеров. На MVP — **`aiocache` (in-memory)**, при росте — **Redis**.
+Sits between Source Adapters and Aggregator — an adapter-response cache. MVP — **`aiocache` (in-memory)**, growing into **Redis**.
 
-**Зачем нужен:** при 5 альтернативных аэропортах × 3 источника × N подписок одна и та же пара (BEG→BCN, 10-20 июля) запрашивается многократно за час. Без кэша лимиты бесплатных API сгорят за день.
+**Why it's needed:** with 5 alternative airports × 3 sources × N subscriptions, the same pair (BEG→BCN, 10–20 July) is queried many times per hour. Without a cache, free-tier limits burn out within a day.
 
-**Ключ:** `(source, origin, destination, date_from, date_to, options_hash)`.
-**TTL:** 15 минут для high-priority подписок, 60 минут для остальных. Конфигурируется per-source.
-**Инвалидация:** только по TTL. Принудительный сброс — командой `/refresh <id>` (та же, что `/search`, но игнорирует кэш).
+**Key:** `(source, origin, destination, date_from, date_to, options_hash)`.
+**TTL:** 15 minutes for high-priority subscriptions, 60 minutes for the rest. Configurable per source.
+**Invalidation:** TTL only. Forced refresh — via the `/refresh <id>` command (same as `/search`, but bypasses the cache).
 
-Запись в `price_observations` идёт **всегда** (даже на cache hit), чтобы история не имела дыр от кэша. Но `api_call_log` пополняется только при реальном HTTP-запросе.
+A write to `price_observations` happens **always** (even on a cache hit) so that history has no cache-induced gaps. But `api_call_log` is appended only on a real HTTP request.
 
 #### Currency Normalizer
 
-Адаптеры могут отдавать цены в разных валютах: Aviasales — в зависимости от `currency` параметра (RUB/USD/EUR), Kiwi — в EUR, Ryanair — в локальной валюте маршрута (EUR/GBP/RON/...).
+Adapters can return prices in different currencies: Aviasales — depending on the `currency` parameter (RUB/USD/EUR), Kiwi — in EUR, Ryanair — in the route's local currency (EUR/GBP/RON/...).
 
-Все цены в системе приводятся к **базовой валюте (EUR)** перед записью в Price History Store и сравнением в Alert Engine. Иначе `$87 < €100` → ложный алерт.
+All prices in the system are converted to a **base currency (EUR)** before being written to the Price History Store and compared in the Alert Engine. Otherwise `$87 < €100` → false alert.
 
-**Источник курсов:** **ECB daily reference rates** (`https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml`). Бесплатно, обновляется в будний день ~16:00 CET.
-**Кэш курсов:** таблица `fx_rates(date, currency, rate_to_eur)`, обновление раз в сутки.
-**Fallback:** если ECB недоступен, используется последний известный курс из БД (с пометкой `stale_rate=true` в логах).
+**Source of rates:** **ECB daily reference rates** (`https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml`). Free, updated around 16:00 CET on business days.
+**Rate cache:** the `fx_rates(date, currency, rate_to_eur)` table, refreshed once per day.
+**Fallback:** if the ECB is unreachable, the last known rate from the DB is used (tagged `stale_rate=true` in logs).
 
-В каждом `price_observation` сохраняем **обе цены** — оригинальную (`price`, `currency`) и нормализованную (`price_eur`). Это нужно для отображения пользователю и для аудита.
+In each `price_observation` we store **both prices** — the original (`price`, `currency`) and the normalized one (`price_eur`). This is needed for user-facing display and for auditing.
 
 #### Aggregator / Deduplication
 
-Собирает результаты со всех адаптеров, дедуплицирует и сортирует.
+Collects results from all adapters, deduplicates, and sorts.
 
-**Ключ дедупликации:** `(airline, flight_number, departure_at_date)`. Один и тот же физический рейс может прилететь от 3 адаптеров с разными ценами — оставляем минимальную, но сохраняем все источники в метаданных (для отладки и отображения «доступно на: Aviasales, Kiwi»).
+**Dedup key:** `(airline, flight_number, departure_at_date)`. The same physical flight may come back from 3 adapters at different prices — we keep the minimum, but preserve all sources in metadata (for debugging and for displaying "available on: Aviasales, Kiwi").
 
-**Особый случай — multi-segment рейсы.** Дедупликация по составному ключу из всех сегментов. Если хоть один сегмент отличается — это разные варианты.
+**Special case — multi-segment flights.** Deduplication uses a composite key across all segments. If any segment differs, these are distinct itineraries.
 
-**Сортировка:** по эффективной цене (`price_eur + transfer_cost_eur`), не по сырой цене билета. Так Будапешт с трансфером сравнивается с Белградом по-честному.
+**Sorting:** by effective price (`price_eur + transfer_cost_eur`), not by raw ticket price. This way Budapest with transfer is compared to Belgrade on a level playing field.
 
-**Pipeline в Aggregator:**
+**Aggregator pipeline:**
 
-1. Сбор результатов из всех адаптеров (`asyncio.gather(return_exceptions=True)`).
-2. Currency Normalizer: каждый `Flight.price` → `Flight.price_eur`.
-3. Sanity check (вторая линия — после адаптера): отбрасываем рейсы с `price_eur < €10` или `> €5000` (логируем с пометкой `outlier=true`).
-4. Прибавление стоимости трансфера для альтернативных аэропортов.
-5. Дедупликация по `(airline, flight_number, departure_date)`.
-6. Сортировка по эффективной цене.
+1. Collect results from all adapters (`asyncio.gather(return_exceptions=True)`).
+2. Currency Normalizer: each `Flight.price` → `Flight.price_eur`.
+3. Sanity check (second line — after the adapter): drop flights with `price_eur < €10` or `> €5000` (logged with `outlier=true`).
+4. Add transfer cost for alternative airports.
+5. Deduplicate by `(airline, flight_number, departure_date)`.
+6. Sort by effective price.
 
-Pipeline идёмпотентный — пересчёт того же набора Flight даёт тот же результат.
+The pipeline is idempotent — recomputing on the same Flight set yields the same result.
 
 #### Price History Store
 
-Хранилище временных рядов цен. Минимальная схема:
+Storage for the price time series. Minimal schema:
 
 ```
 price_observations (
   id              int pk,
   route_key       str,        -- 'BEG-BCN-2026-07-15'
-  subscription_id uuid,       -- nullable, для отслеживания, чьим запросом получено
-  price           float,      -- оригинальная цена
-  currency        str,        -- оригинальная валюта
-  price_eur       float,      -- нормализованная к EUR
+  subscription_id uuid,       -- nullable, tracks which subscription's query produced it
+  price           float,      -- original price
+  currency        str,        -- original currency
+  price_eur       float,      -- normalized to EUR
   source          str,
-  flight_signature str,       -- airline+flight_number, для идентификации рейса
-  departure_at    timestamp,  -- TZ-aware, аэропорт вылета
+  flight_signature str,       -- airline+flight_number, for flight identification
+  departure_at    timestamp,  -- TZ-aware, departure airport
   observed_at     timestamp,  -- UTC
   outlier         bool default false,
   raw_payload     json
 )
 
--- Идемпотентность: один и тот же рейс из одного источника в один час
--- не должен попадать в БД дважды (защита от retry-ов).
+-- Idempotency: the same flight from the same source within one hour
+-- must not enter the DB twice (defense against retries).
 UNIQUE INDEX idx_obs_dedup ON price_observations (
   flight_signature, departure_at, source, date_trunc('hour', observed_at)
 );
 
--- Индексы для быстрых агрегатов в Alert Engine
+-- Indexes for fast aggregates in the Alert Engine
 INDEX idx_obs_route_time ON price_observations (route_key, observed_at DESC);
 INDEX idx_obs_route_signature ON price_observations (route_key, flight_signature, observed_at DESC);
 ```
 
-**Политика хранения:**
+**Retention policy:**
 
-- Близкие даты (< 30 дней до вылета): 1 точка в час
-- Средние (30-90): 1 точка в сутки
-- Дальние (> 90): 1 точка в сутки + дедупликация по дню
-- Через 14 дней после даты вылета: удаление
+- Near-term dates (< 30 days to departure): 1 point per hour
+- Medium-term (30–90): 1 point per day
+- Long-term (> 90): 1 point per day + dedup by day
+- 14 days past departure: deletion
 
-Реализуется через периодический job (`apscheduler`, раз в сутки): downsampling + удаление протухших.
+Implemented via a periodic job (`apscheduler`, once per day): downsampling + deletion of expired entries.
 
-**Outlier handling:** при записи помечается `outlier=true` для цен, которые более чем в 3× ниже медианы по `route_key` за последние 30 дней (с учётом непустой выборки ≥ 20 точек). Такие записи **не участвуют** в агрегатах Alert Engine, но остаются в БД для аудита.
+**Outlier handling:** at write time, a record is flagged `outlier=true` if its price is more than 3× below the `route_key` median over the last 30 days (provided a sample of at least 20 points exists). Such records **do not participate** in Alert Engine aggregates but stay in the DB for auditing.
 
-**При переходе на PostgreSQL** — рассмотреть расширение **TimescaleDB** для `price_observations`. Hypertable + автоматический downsampling из коробки. Но не для MVP.
+**When moving to PostgreSQL** — consider the **TimescaleDB** extension for `price_observations`. Hypertables + automatic downsampling out of the box. Not for MVP, though.
 
-Из этих данных Alert Engine считает агрегаты: скользящее среднее, медиана, минимум за N дней.
+From this data the Alert Engine computes aggregates: moving average, median, minimum over N days.
 
 #### Alert Engine
 
-Решает, отправлять ли уведомление. Поддерживает несколько стратегий, выбирается на уровне подписки:
+Decides whether to send a notification. Supports several strategies, selected per subscription:
 
-| Стратегия | Логика |
-|-----------|--------|
-| `absolute_threshold` | Цена ≤ `max_price` |
-| `relative_drop` | Цена ≤ среднее за 30 дней × (1 − `drop_pct`) |
-| `historical_minimum` | Новый минимум за последние N дней (например, 60) |
-| `sudden_drop` | Цена упала на ≥ X% по сравнению с предыдущей точкой |
-| `combined` | Любой из условий выше срабатывает (OR) |
+| Strategy | Logic |
+|----------|-------|
+| `absolute_threshold` | Price ≤ `max_price` |
+| `relative_drop` | Price ≤ 30-day average × (1 − `drop_pct`) |
+| `historical_minimum` | New minimum over the last N days (e.g., 60) |
+| `sudden_drop` | Price dropped by ≥ X% compared to the previous point |
+| `combined` | Any of the above triggers (OR) |
 
-**Антиспам:**
+**Anti-spam:**
 
-- Cooldown между алертами по одной подписке (по умолчанию 6 часов).
-- Дедупликация: если та же цена для того же рейса уже отправлялась — не алертим.
-- «Stable price» защита: если цена колеблется в пределах ±2% от уже алертенной — не повторяем.
+- Cooldown between alerts per subscription (default 6 hours).
+- Deduplication: if the same price for the same flight has already been sent — no alert.
+- "Stable price" guard: if the price oscillates within ±2% of an already-alerted value — do not repeat.
 
-**Логирование решений:** для каждого срабатывания/несрабатывания пишется запись с входными данными и итогом. Это нужно для отладки («почему алерт не пришёл?»).
+**Decision logging:** every trigger / non-trigger writes a record with input data and the outcome. This is needed for debugging ("why didn't an alert come?").
 
-**Dry-run режим.** На уровне подписки — флаг `dry_run: bool`. В этом режиме Alert Engine проходит весь pipeline, но **не отправляет** уведомление в Telegram, только пишет в `alerts_sent` с пометкой `dry_run=true`. Используется для:
+**Dry-run mode.** A subscription-level flag — `dry_run: bool`. In this mode the Alert Engine runs the whole pipeline but **does not send** to Telegram; it only writes to `alerts_sent` with `dry_run=true`. Used for:
 
-- Тюнинга новых стратегий на исторических данных (replay из CLI: `python -m warden.replay --subscription <id> --strategy ...`).
-- Тихого тестирования перед включением нового маршрута.
+- Tuning new strategies against historical data (CLI replay: `python -m warden.replay --subscription <id> --strategy ...`).
+- Silent testing before enabling a new route.
 
-**Тайм-зоны (важно):**
+**Time zones (important):**
 
-- В БД всё в UTC (`TIMESTAMP WITH TIME ZONE` на Postgres, ISO-8601 строки с явным `+00:00` на SQLite).
-- `departure_at` / `arrival_at` — TZ-aware с зоной аэропорта.
-- Резолв TZ аэропорта — через **`airportsdata`** package (offline-данные, без внешних запросов).
-- Для отображения в Telegram — конвертация в TZ аэропорта вылета через `zoneinfo`.
-- Все сравнения дат в Alert Engine — в UTC; форматирование — в локальной TZ непосредственно перед отправкой.
+- Everything in the DB is in UTC (`TIMESTAMP WITH TIME ZONE` on Postgres, ISO-8601 strings with explicit `+00:00` on SQLite).
+- `departure_at` / `arrival_at` are TZ-aware in the airport's zone.
+- Airport TZ resolution — via the **`airportsdata`** package (offline data, no external requests).
+- For Telegram display — convert to the departure airport's TZ via `zoneinfo`.
+- All date comparisons in the Alert Engine are in UTC; formatting happens in the local TZ immediately before sending.
 
 #### Notification Layer
 
-Форматирует и отправляет уведомления в Telegram. Структура сообщения:
+Formats and sends notifications to Telegram. Message structure:
 
 ```
-✈️ Дешёвый билет найден!
+✈️ Cheap ticket found!
 
 BEG → BCN
-🗓 15 июля 2026, 09:30 → 12:45
-💰 €87 (Wizz Air, прямой, 3ч 15м)
+🗓 15 July 2026, 09:30 → 12:45
+💰 €87 (Wizz Air, direct, 3h 15m)
 
-📊 Это −34% от среднего за 30 дней (€132)
-📊 Новый минимум за последние 60 дней
-📊 Доступно на: Aviasales, Kiwi
+📊 That's −34% off the 30-day average (€132)
+📊 New minimum over the last 60 days
+📊 Available on: Aviasales, Kiwi
 
-[Купить] [Детали] [Отключить алерт]
+[Buy] [Details] [Mute alert]
 ```
 
-Если выгоднее лететь из альтернативного аэропорта — отдельная пометка:
+If flying from an alternative airport is cheaper, a separate note:
 
 ```
-💡 Из Будапешта (BUD) дешевле:
-   €52 + €25 трансфер = €77 эффективно
+💡 Cheaper from Budapest (BUD):
+   €52 + €25 transfer = €77 effective
 ```
 
 #### Observability
 
-Бот работает 24/7 без присмотра — без observability упавший адаптер или выжженная квота заметятся через неделю по молчанию уведомлений.
+The bot runs 24/7 unattended — without observability, a downed adapter or a burnt-out quota gets noticed a week later by the silence of alerts.
 
-**Логи:** **`structlog`** в JSON-формате. Каждая запись — с `subscription_id`, `source`, `route_key`, `trace_id` (UUID на цикл проверки одной подписки). Уровень из конфига.
+**Logs:** **`structlog`** in JSON. Each record carries `subscription_id`, `source`, `route_key`, `trace_id` (a UUID for one subscription's check cycle). Log level from config.
 
-**Метрики:** **`prometheus_client`** в pull-режиме (endpoint `/metrics` на отдельном порту). Минимальный набор:
+**Metrics:** **`prometheus_client`** in pull mode (endpoint `/metrics` on a separate port). Minimal set:
 
 - `warden_adapter_requests_total{source, status}` — counter
 - `warden_adapter_latency_seconds{source}` — histogram
@@ -409,19 +409,19 @@ BEG → BCN
 - `warden_subscriptions_active` — gauge
 - `warden_db_size_bytes` — gauge
 
-Скрейпить можно из соседнего docker-сервиса (Grafana Cloud free tier поддерживает scrape по public URL через agent).
+Scraping can be done from a sidecar docker service (Grafana Cloud free tier supports scraping by public URL via the agent).
 
-**Error tracking:** **Sentry** (`sentry-sdk` с интеграциями для httpx, aiogram, SQLAlchemy). Конфигурируется DSN из env. Бесплатный tier (5K errors/мес) с запасом покрывает personal-проект.
+**Error tracking:** **Sentry** (`sentry-sdk` with integrations for httpx, aiogram, SQLAlchemy). DSN from env. The free tier (5K errors/month) covers a personal project with room to spare.
 
-**Health endpoint:** `/health` отвечает 200 если бот жив и БД доступна, иначе 503. Используется для uptime-мониторинга (UptimeRobot free tier).
+**Health endpoint:** `/health` returns 200 if the bot is alive and the DB is reachable, otherwise 503. Used for uptime monitoring (UptimeRobot free tier).
 
-**Команда `/health`** в Telegram-боте — выводит текущее состояние: aliveness каждого адаптера (по `api_call_log` за последний час), размер БД, количество активных подписок, последний успешный цикл проверки.
+**The `/health` Telegram command** — outputs current state: aliveness of each adapter (from `api_call_log` over the last hour), DB size, number of active subscriptions, last successful check cycle.
 
 #### Config & Secrets
 
-Конфиг — через **`pydantic-settings`**: type-safe, валидация на старте, source = env-variables + `.env`-файл локально, secrets через env в проде.
+Config goes through **`pydantic-settings`**: type-safe, validated at startup, source = env variables + `.env` file locally, secrets via env in prod.
 
-Структурирован по группам:
+Grouped by domain:
 
 ```python
 class TelegramSettings(BaseSettings):
@@ -450,44 +450,44 @@ class ObservabilitySettings(BaseSettings):
     metrics_port: int = 9090
 ```
 
-**Секреты в проде:** **`.env` смонтированный в контейнер**, либо **Docker secrets**. Не коммитятся; `.env.example` лежит в репо как референс.
+**Secrets in prod:** a **`.env` file mounted into the container** or **Docker secrets**. Not committed; `.env.example` lives in the repo as a reference.
 
-**Проверка на старте:** все обязательные поля валидируются Pydantic-ом, при ошибке бот падает с понятным сообщением. Альтернатива «оно потом упадёт где-то глубоко» — недопустима для 24/7 сервиса.
-
----
-
-## 4. Поток данных (end-to-end сценарий)
-
-**Сценарий:** пользователь создал подписку BEG → Барселона (BCN), даты 10-20 июля 2026, гибкость по аэропортам вылета вкл., стратегия `combined` (порог €100 ИЛИ -25% от среднего).
-
-1. Scheduler триггерит проверку подписки (дата вылета через ~50 дней → medium-priority, проверка каждые 4 часа). Назначается `trace_id` для сквозного логирования всего цикла.
-2. Subscription Manager отдаёт правило → передаётся в Multi-Airport Expander.
-3. Expander разворачивает в 5 пар: (BEG, BCN), (BUD, BCN), (SOF, BCN), (TSR, BCN), (ZAG, BCN). Для каждой пары + диапазон дат — формируются запросы.
-4. **Cache Layer** проверяет каждый ключ `(source, origin, destination, date_from, date_to)`. На hit — возвращает кэшированный список Flight. На miss — идёт дальше.
-5. На miss-запросы пуляются параллельно в Aviasales, Kiwi, Ryanair adapters. Каждый адаптер:
-   - Соблюдает свой rate limit (`aiolimiter`).
-   - Применяет retry/backoff (`tenacity`).
-   - Проверяется circuit breaker — если адаптер «выключен», запрос пропускается.
-   - Делает sanity check на ответе.
-   - Возвращает нормализованный список Flight.
-   - Кладёт результат в Cache Layer.
-6. **Currency Normalizer** добавляет `price_eur` каждому Flight по актуальному курсу из `fx_rates`.
-7. Aggregator сливает результаты, дедуплицирует. К `price_eur` из альтернативных аэропортов прибавляется стоимость трансфера → `effective_price_eur`.
-8. Каждое наблюдение записывается в Price History Store (с outlier-проверкой).
-9. Alert Engine для каждого Flight проверяет условия стратегии подписки:
-   - Цена ≤ €100? → проверяет.
-   - Цена ≤ среднее_за_30_дней × 0.75? → достаёт среднее из истории (исключая `outlier=true`), проверяет.
-   - Сработала хоть одна — кандидат на алерт.
-10. Кандидаты проходят антиспам (cooldown, дедупликация по уже отправленным, stable-price защита).
-11. Если подписка в `dry_run` — запись в `alerts_sent` с пометкой, без отправки в Telegram.
-12. Иначе — Notification Layer форматирует и отправляет в Telegram. Сохраняется `message_id` для возможной правки.
-13. Метрики цикла (latency, кол-во найденных Flight, кол-во алертов) обновляются в Prometheus.
+**Startup validation:** every required field is validated by Pydantic; on failure the bot crashes with a clear message. The alternative — "it will explode somewhere deep later" — is unacceptable for a 24/7 service.
 
 ---
 
-## 5. Структура данных (схема БД)
+## 4. Data flow (end-to-end scenario)
 
-Миграции — **Alembic** с первой версии. SQLite-совместимый синтаксис на MVP, переход на Postgres — без переписывания DDL.
+**Scenario:** the user created a subscription BEG → Barcelona (BCN), dates 10–20 July 2026, departure-airport flexibility enabled, `combined` strategy (threshold €100 OR −25% off the average).
+
+1. The Scheduler triggers a subscription check (departure ~50 days away → medium-priority, every 4 hours). A `trace_id` is assigned for end-to-end logging of the whole cycle.
+2. The Subscription Manager hands over the rule → passed to the Multi-Airport Expander.
+3. The Expander unfolds into 5 pairs: (BEG, BCN), (BUD, BCN), (SOF, BCN), (TSR, BCN), (ZAG, BCN). For each pair + date range, requests are formed.
+4. **Cache Layer** checks each key `(source, origin, destination, date_from, date_to)`. On a hit, the cached Flight list is returned. On a miss, the request continues.
+5. Miss requests are fired in parallel into the Aviasales, Kiwi, Ryanair adapters. Each adapter:
+   - Respects its own rate limit (`aiolimiter`).
+   - Applies retry/backoff (`tenacity`).
+   - Checks the circuit breaker — if the adapter is "tripped", the request is skipped.
+   - Performs a sanity check on the response.
+   - Returns a normalized Flight list.
+   - Writes the result back to the Cache Layer.
+6. **Currency Normalizer** adds `price_eur` to each Flight using the current rate from `fx_rates`.
+7. The Aggregator merges results, deduplicates. For alternative airports, transfer cost is added to `price_eur` → `effective_price_eur`.
+8. Every observation is written to the Price History Store (with outlier check).
+9. The Alert Engine checks the subscription's strategy conditions for every Flight:
+   - Price ≤ €100? → checks.
+   - Price ≤ 30-day average × 0.75? → fetches the average from history (excluding `outlier=true`), checks.
+   - If any matches — alert candidate.
+10. Candidates pass through anti-spam (cooldown, dedup against already sent, stable-price guard).
+11. If the subscription is in `dry_run`, a row is written to `alerts_sent` with the flag, without sending to Telegram.
+12. Otherwise, the Notification Layer formats and sends to Telegram. The `message_id` is stored for possible later edits.
+13. Cycle metrics (latency, Flights found, alerts generated) are updated in Prometheus.
+
+---
+
+## 5. Data model (DB schema)
+
+Migrations use **Alembic** from the very first revision. SQLite-compatible syntax on MVP — the path to Postgres requires no DDL rewrites.
 
 ```
 subscriptions
@@ -550,7 +550,7 @@ fx_rates
 
   PRIMARY KEY (date, currency)
 
-scheduler_runs                 -- для /health и метрик
+scheduler_runs                 -- for /health and metrics
   id (bigint pk),
   subscription_id (uuid fk),
   started_at, finished_at,
@@ -561,264 +561,264 @@ scheduler_runs                 -- для /health и метрик
   error (str nullable)
 ```
 
-**Foreign keys:** `subscription_id` в `price_observations` — `ON DELETE SET NULL` (история переживает удаление подписки), в `alerts_sent` — `ON DELETE CASCADE` (алерты бессмысленны без подписки).
+**Foreign keys:** `subscription_id` in `price_observations` — `ON DELETE SET NULL` (history outlives subscription deletion); in `alerts_sent` — `ON DELETE CASCADE` (alerts are meaningless without a subscription).
 
-**JSON-поля** на SQLite работают через `JSON1` extension, на Postgres — нативный `jsonb`. SQLAlchemy 2.x абстрагирует.
+**JSON fields** on SQLite work via the `JSON1` extension; on Postgres — native `jsonb`. SQLAlchemy 2.x abstracts the difference.
 
 ---
 
-## 6. План внедрения (MVP → Full)
+## 6. Implementation roadmap (MVP → Full)
 
-### MVP (1-2 недели)
+### MVP (1–2 weeks)
 
-Цель: рабочий бот для одного маршрута, один источник, ручные алерты. **Уже с базовой инфраструктурой**, чтобы не переделывать.
+Goal: a working bot for a single route, one source, manual alerts. **Already with the baseline infrastructure** so it doesn't need to be redone later.
 
-**Функционал:**
+**Functionality:**
 
-- Telegram Bot Layer (aiogram 3.x): команды `/new`, `/list`, `/delete`, whitelist пользователей.
-- Subscription Manager на SQLite, без альтернативных аэропортов.
-- Один адаптер: **Aviasales / Travelpayouts**.
-- Scheduler (APScheduler async): один общий cron, проверка раз в час.
-- Currency Normalizer с ECB-курсами.
-- Price History Store: запись + запрос «минимум за N дней».
-- Alert Engine: `absolute_threshold` и `historical_minimum`, cooldown.
-- Notification Layer: текстовое уведомление без inline-кнопок.
+- Telegram Bot Layer (aiogram 3.x): commands `/new`, `/list`, `/delete`, user whitelist.
+- Subscription Manager on SQLite, without alternative airports.
+- One adapter: **Aviasales / Travelpayouts**.
+- Scheduler (APScheduler async): one shared cron, hourly check.
+- Currency Normalizer with ECB rates.
+- Price History Store: write + simple "minimum over N days" query.
+- Alert Engine: `absolute_threshold` and `historical_minimum`, cooldown.
+- Notification Layer: text notifications without inline buttons.
 
-**Инфраструктура (с первого дня):**
+**Infrastructure (from day one):**
 
-- Alembic-миграции.
-- pydantic-settings для конфига.
+- Alembic migrations.
+- pydantic-settings for config.
 - structlog + Sentry.
 - Docker + docker-compose.
-- `pytest` с базовыми тестами адаптера (фикстуры через `respx`).
-- GitHub Actions: lint (ruff) + типы (mypy) + tests.
+- `pytest` with baseline adapter tests (fixtures via `respx`).
+- GitHub Actions: lint (ruff) + types (mypy) + tests.
 
-### v1.0 (следующие 1-2 недели)
+### v1.0 (next 1–2 weeks)
 
-- Добавление Kiwi adapter, Ryanair adapter.
-- Aggregator с дедупликацией и sanity check.
+- Adding the Kiwi adapter and Ryanair adapter.
+- Aggregator with deduplication and sanity check.
 - Cache Layer (in-memory).
-- Multi-Airport Expander с справочником трансферов.
-- Circuit breaker для адаптеров.
-- Alert Engine: `relative_drop`, `combined`, антиспам полностью (cooldown + dedup + stable-price).
-- Inline-кнопки в уведомлениях.
-- Команда `/stats` со статистикой по подписке.
-- Команда `/health` с aliveness адаптеров.
-- Prometheus-метрики на `/metrics`.
-- Dry-run режим для подписок.
-- Бэкап SQLite в отдельный том раз в сутки.
+- Multi-Airport Expander with the transfer reference table.
+- Circuit breaker for adapters.
+- Alert Engine: `relative_drop`, `combined`, full anti-spam (cooldown + dedup + stable-price).
+- Inline buttons in notifications.
+- `/stats` command with subscription statistics.
+- `/health` command with adapter aliveness.
+- Prometheus metrics on `/metrics`.
+- Dry-run mode for subscriptions.
+- SQLite backup to a separate volume once a day.
 
-### v1.1+ (по необходимости)
+### v1.1+ (as needed)
 
-- Переход SQLite → PostgreSQL (опционально TimescaleDB для price_observations).
-- Redis для Cache Layer (вместо in-memory).
-- Amadeus adapter / Duffel adapter как резерв.
-- Графики истории цен — matplotlib → PNG → `send_photo` в Telegram (по команде `/stats`).
-- Trend Analyzer — еженедельная сводка по подпискам.
-- Calendar Heatmap картинкой.
-- Smart suggestions («куда дёшево из БГ на эти выходные»).
-- Поддержка round-trip с двумя независимыми билетами разных авиакомпаний (Kiwi-style virtual interlining) — требует переработки модели Flight в Itinerary.
-- Wizz Air monitoring через headless browser (Playwright в отдельном контейнере).
-
----
-
-## 7. Риски и митигации
-
-| Риск | Митигация |
-|------|-----------|
-| Бан/блокировка адаптера Ryanair (неофициальный API) | Graceful fallback, circuit breaker, не валить общий цикл. Мониторинг доступности через `/health`. |
-| Превышение лимитов бесплатных API | Cache Layer (15-60 мин), jittering scheduler-а, приоритезация по близости дат, `aiolimiter` per-source. Метрика `warden_adapter_quota_remaining`. |
-| Изменение схемы ответов API | Pydantic-валидация на выходе адаптера, контрактные тесты с фикстурами (`respx` + записанные ответы), логирование `raw_payload` в БД. Sentry-алерт на пик ошибок парсинга. |
-| Раздувание БД | Политика хранения с downsampling и удалением старых наблюдений (см. Price History Store). Метрика `warden_db_size_bytes`. |
-| Спам уведомлениями | Cooldown, дедупликация, stable-price защита (±2%). Кнопка «отключить алерт». |
-| Ложные срабатывания (битая цена €1, цена в копейках) | Двухуровневый sanity check: внутри адаптера (абсолютные пороги) + outlier-флаг в БД (относительно медианы маршрута). Outlier'ы не участвуют в агрегатах. |
-| Часовые пояса | UTC в БД, TZ-aware datetime через `zoneinfo`. Резолв аэропорта → `airportsdata` offline. Цены в EUR после нормализации. Покрыто тестами с `freezegun`. |
-| **Скачки валютных курсов / ECB недоступен** | Кэш курсов в БД, fallback на последний известный, лог `stale_rate=true`. Sentry-алерт если курс не обновляется > 3 дней. |
-| **Deprecation внешних API (Kiwi Tequila переезд)** | Изоляция через интерфейс `BaseAdapter`. План замены — Duffel/FlightAPI/SerpAPI. Контрактный тест ловит breaking changes. |
-| **Перегрев event loop при синхронной операции** | Все I/O через async, CPU-heavy (парсинг) — через `asyncio.to_thread`. Метрика latency цикла поможет заметить деградацию. |
-| **Потеря данных при рестарте** | SQLAlchemyJobStore для APScheduler (джобы переживают рестарт). Бэкап БД раз в сутки. Идемпотентность записи в `price_observations`. |
-| **Whitelist обход или утечка токена** | Все секреты в env / Docker secrets, не в git. ALLOWED_USER_IDS как первая линия. Логирование отброшенных апдейтов для аудита. |
+- Migrating SQLite → PostgreSQL (optionally TimescaleDB for price_observations).
+- Redis for the Cache Layer (instead of in-memory).
+- Amadeus adapter / Duffel adapter as a backup.
+- Price history charts — matplotlib → PNG → `send_photo` to Telegram (via `/stats`).
+- Trend Analyzer — a weekly digest across subscriptions.
+- Calendar Heatmap as an image.
+- Smart suggestions ("where to fly cheaply from BG this weekend").
+- Round-trip support with two independent tickets on different airlines (Kiwi-style virtual interlining) — requires reworking the Flight model into an Itinerary.
+- Wizz Air monitoring via a headless browser (Playwright in a separate container).
 
 ---
 
-## 8. Открытые вопросы
+## 7. Risks and mitigations
 
-**Решено в v0.2:**
-
-- ~~Где деплоить?~~ → Hetzner Cloud (~€4-5/мес). Free-tier Railway/Fly.io ненадёжен для 24/7.
-- ~~Webhook или long-polling?~~ → Long-polling для MVP.
-- ~~SQLite или Postgres с начала?~~ → SQLite на MVP, путь к Postgres расчищен (Alembic, SQLAlchemy 2.x async, `aiosqlite` → `asyncpg` сменой драйвера).
-
-**Остаются открытыми:**
-
-- **Статус Kiwi Tequila в 2026.** Нужна верификация: остался ли бесплатный tier, выдают ли новые ключи. План B — Duffel (есть test mode).
-- **Round-trip с virtual interlining.** Требует переработки `Flight` → `Itinerary` (список Flight как один билет). Отложено в v1.1+; пока считаем round-trip как пара независимых one-way.
-- **Наземный транспорт.** Статический справочник vs Omio API. Прикинуть после v1.0: если справочник часто ошибается (жалобы пользователя) — мигрировать.
-- **Wizz Discount Club.** Headless Playwright в отдельном контейнере (запуск раз в день) — рабочий вариант, но требует поддержки. Альтернатива — email-forwarding через IMAP, но хрупко при изменении шаблонов писем. Решить в v1.1+.
-- **Кому реально нужны графики истории.** Если только владелец — `matplotlib` → PNG достаточно. Если планируется расширить круг — мини-веб-морда с FastAPI + Chart.js. Решить по факту использования.
-- **Telegram premium-фичи.** Бот может отправлять интерактивные графики через WebApp. Полезно для пристального анализа подписки, но требует HTTPS-endpoint — повышает порог входа. Отложено.
+| Risk | Mitigation |
+|------|------------|
+| Ryanair adapter ban / block (unofficial API) | Graceful fallback, circuit breaker, do not crash the cycle. Availability monitoring via `/health`. |
+| Free API limits exhausted | Cache Layer (15–60 min), scheduler jittering, prioritization by departure proximity, per-source `aiolimiter`. The `warden_adapter_quota_remaining` metric. |
+| API response schema changes | Pydantic validation at the adapter output, contract tests with fixtures (`respx` + recorded responses), `raw_payload` logged in the DB. Sentry alert on a spike in parsing errors. |
+| DB bloat | Retention policy with downsampling and deletion of old observations (see Price History Store). The `warden_db_size_bytes` metric. |
+| Notification spam | Cooldown, dedup, stable-price guard (±2%). "Mute alert" button. |
+| False triggers (broken €1 price, price in cents) | Two-layer sanity check: inside the adapter (absolute thresholds) + outlier flag in the DB (relative to the route median). Outliers excluded from aggregates. |
+| Time zones | UTC in the DB, TZ-aware datetimes via `zoneinfo`. Airport resolution via `airportsdata` offline. Prices in EUR after normalization. Covered with `freezegun` tests. |
+| **FX rate swings / ECB unreachable** | Rate cache in the DB, fallback to last known, `stale_rate=true` log. Sentry alert if rates aren't refreshed for > 3 days. |
+| **External API deprecation (Kiwi Tequila move)** | Isolation via the `BaseAdapter` interface. Replacement plan — Duffel/FlightAPI/SerpAPI. Contract tests catch breaking changes. |
+| **Event loop stalls on a sync operation** | All I/O is async, CPU-heavy parsing offloaded via `asyncio.to_thread`. The cycle-latency metric helps spot degradation. |
+| **Data loss on restart** | SQLAlchemyJobStore for APScheduler (jobs survive restart). Daily DB backup. Idempotent writes in `price_observations`. |
+| **Whitelist bypass or token leak** | All secrets via env / Docker secrets, never in git. ALLOWED_USER_IDS as the first line. Logging of dropped updates for auditing. |
 
 ---
 
-## 9. Технологический стек
+## 8. Open questions
 
-Все выборы — с обоснованием. Альтернативы перечислены там, где они реально рассматривались.
+**Resolved in v0.2:**
 
-### Язык и runtime
+- ~~Where to deploy?~~ → Hetzner Cloud (~€4–5/month). Free-tier Railway/Fly.io is unreliable for 24/7.
+- ~~Webhook or long-polling?~~ → Long-polling for MVP.
+- ~~SQLite or Postgres from the start?~~ → SQLite on MVP, the path to Postgres is clear (Alembic, SQLAlchemy 2.x async, `aiosqlite` → `asyncpg` by driver swap).
 
-- **Python 3.12+** — `ryanair-py` использует свежий typing, и Pydantic v2 / SQLAlchemy 2.x работают эффективнее на 3.12.
-- Asyncio как основная модель concurrency. Threads — только для CPU-heavy парсинга через `asyncio.to_thread`.
+**Still open:**
 
-### Telegram-бот
+- **Kiwi Tequila status in 2026.** Needs verification: is the free tier still around, are new keys being issued? Plan B — Duffel (has a test mode).
+- **Round-trip with virtual interlining.** Requires reworking `Flight` → `Itinerary` (a list of Flights treated as one ticket). Deferred to v1.1+; for now round-trip is treated as a pair of independent one-ways.
+- **Ground transport.** A static lookup vs the Omio API. Reassess after v1.0: if the static lookup is often wrong (user complaints), migrate.
+- **Wizz Discount Club.** A headless Playwright in a separate container (runs once a day) is a workable option but requires maintenance. The alternative — email forwarding via IMAP — is fragile to template changes. Decide in v1.1+.
+- **Who actually needs price history charts.** If only the owner — `matplotlib` → PNG is enough. If a wider circle is planned — a small FastAPI + Chart.js web frontend. Decide based on real usage.
+- **Telegram premium features.** The bot can send interactive charts via WebApp. Useful for close subscription analysis, but requires an HTTPS endpoint — raises the entry barrier. Deferred.
 
-- **`aiogram` 3.x** — async-first, FSM из коробки (нужен для пошагового `/new`), Pydantic-валидация апдейтов, активное развитие.
-- Альтернатива `python-telegram-bot` — отвергнута: тяжёлая, более «классическая» API.
+---
 
-### HTTP-клиенты и устойчивость
+## 9. Technology stack
 
-- **`httpx.AsyncClient`** — стандарт async HTTP. Поддерживает HTTP/2, connection pool, удобная инжекция в тестах через `respx`.
-- **`tenacity`** — retry с экспоненциальным backoff и jitter. Декоратор-based, читается лучше чем кастомные циклы.
-- **`aiolimiter`** — token bucket для rate limiting per-source.
-- **`pybreaker`** — circuit breaker. Альтернатива — собственный счётчик в Redis/БД, но `pybreaker` готовый.
+Every choice comes with rationale. Alternatives are listed where they were actually considered.
+
+### Language and runtime
+
+- **Python 3.12+** — `ryanair-py` uses modern typing, and Pydantic v2 / SQLAlchemy 2.x run more efficiently on 3.12.
+- Asyncio as the primary concurrency model. Threads — only for CPU-heavy parsing via `asyncio.to_thread`.
+
+### Telegram bot
+
+- **`aiogram` 3.x** — async-first, FSM out of the box (needed for the step-by-step `/new`), Pydantic update validation, active development.
+- The `python-telegram-bot` alternative — rejected: heavier, more "classical" API.
+
+### HTTP clients and resilience
+
+- **`httpx.AsyncClient`** — the async HTTP standard. Supports HTTP/2, connection pool, convenient injection in tests via `respx`.
+- **`tenacity`** — retry with exponential backoff and jitter. Decorator-based, reads better than custom loops.
+- **`aiolimiter`** — token bucket for per-source rate limiting.
+- **`pybreaker`** — circuit breaker. The alternative — a custom counter in Redis/DB, but `pybreaker` is ready-made.
 
 ### Scheduler
 
-- **`APScheduler` 3.x (AsyncIOScheduler)** — достаточно для одного инстанса, переживает рестарт через `SQLAlchemyJobStore`.
-- Альтернатива `arq` — отвергнута на MVP (тянет Redis). Рассматривается, если Redis всё равно понадобится для кэша.
+- **`APScheduler` 3.x (AsyncIOScheduler)** — sufficient for a single instance, survives restart via `SQLAlchemyJobStore`.
+- The `arq` alternative — rejected for MVP (pulls in Redis). Reconsidered if Redis is needed anyway for caching.
 
-### База данных и ORM
+### Database and ORM
 
-- **SQLAlchemy 2.x в async-режиме** — современный API (`AsyncSession`, `select()`-style), хорошо типизирован.
-- **`aiosqlite`** (MVP) → **`asyncpg`** (Postgres). Драйвер меняется в connection string без изменений кода.
-- **Alembic** — миграции с первого дня, иначе переход SQLite → Postgres будет страданием.
-- **Pydantic v2** — для нормализованных моделей домена (`Flight`, `Segment`, `AlertParams`).
-- Альтернативы: SQLModel (Pydantic+SQLAlchemy, попроще) — годится, если хочется единого источника схемы. Tortoise ORM — отвергнута: меньше зрелости, хуже с миграциями.
+- **SQLAlchemy 2.x in async mode** — modern API (`AsyncSession`, `select()`-style), well typed.
+- **`aiosqlite`** (MVP) → **`asyncpg`** (Postgres). The driver changes in the connection string without code changes.
+- **Alembic** — migrations from day one, otherwise the SQLite → Postgres move is painful.
+- **Pydantic v2** — for normalized domain models (`Flight`, `Segment`, `AlertParams`).
+- Alternatives: SQLModel (Pydantic+SQLAlchemy, simpler) — fine if a single source of schema is preferred. Tortoise ORM — rejected: less mature, weaker migration story.
 
-### Кэш
+### Cache
 
-- **MVP:** `aiocache` (in-memory backend) — без внешних зависимостей.
-- **v1.1+:** Redis (`redis.asyncio`), если запустится несколько процессов или нужно делиться кэшем с replay-CLI.
+- **MVP:** `aiocache` (in-memory backend) — no external dependencies.
+- **v1.1+:** Redis (`redis.asyncio`) if multiple processes appear or the cache needs to be shared with the replay CLI.
 
-### Конфиг
+### Config
 
-- **`pydantic-settings`** — типизированный конфиг с валидацией на старте. `.env` локально, env-vars / Docker secrets в проде.
+- **`pydantic-settings`** — typed config with startup validation. `.env` locally, env vars / Docker secrets in prod.
 
-### Логирование, метрики, ошибки
+### Logging, metrics, errors
 
-- **`structlog`** — структурированные JSON-логи.
-- **`prometheus-client`** — pull-метрики на отдельном порту.
-- **`sentry-sdk`** — error tracking, бесплатный tier.
+- **`structlog`** — structured JSON logs.
+- **`prometheus-client`** — pull metrics on a separate port.
+- **`sentry-sdk`** — error tracking, free tier.
 
-### Время и FX
+### Time and FX
 
-- **`zoneinfo`** (стандартная либа) для timezone-операций.
-- **`airportsdata`** — offline-резолв TZ аэропортов по IATA.
-- **ECB daily reference rates** — источник FX-курсов, кэшируется в БД.
+- **`zoneinfo`** (stdlib) for timezone operations.
+- **`airportsdata`** — offline TZ resolution by IATA.
+- **ECB daily reference rates** — FX rate source, cached in the DB.
 
-### Тестирование
+### Testing
 
-- **`pytest` + `pytest-asyncio`** — основа.
-- **`respx`** — mock httpx-запросов, фикстуры с записанными ответами адаптеров.
-- **`freezegun`** — фиксация времени в тестах Alert Engine.
-- **`coverage.py`** — таргет 80% для domain-логики (адаптеры, агрегатор, alert engine), для I/O-обёрток — по факту.
+- **`pytest` + `pytest-asyncio`** — the foundation.
+- **`respx`** — mocking httpx requests, fixtures with recorded adapter responses.
+- **`freezegun`** — frozen time in Alert Engine tests.
+- **`coverage.py`** — 80% target for domain logic (adapters, aggregator, alert engine); for I/O wrappers — best effort.
 
-### Линт и типы
+### Lint and types
 
-- **`ruff`** — линтер + форматтер (заменяет flake8/black/isort).
-- **`mypy --strict`** для domain-кода. Для адаптеров — лояльнее, т.к. внешние данные.
+- **`ruff`** — linter + formatter (replaces flake8/black/isort).
+- **`mypy --strict`** for domain code. Looser for adapters because of external data.
 
-### Контейнеризация и деплой
+### Containerization and deployment
 
-- **Docker + docker-compose** с MVP.
-- Базовый образ — `python:3.12-slim`.
-- Деплой — **Hetzner Cloud** (~€4-5/мес). Docker Compose, `restart: always`. Простой watchtower для авто-обновлений из registry (опционально).
-- CI/CD — **GitHub Actions**: lint → tests → docker build → push to GHCR → ssh-deploy (через `appleboy/ssh-action` или watchtower).
+- **Docker + docker-compose** from MVP.
+- Base image — `python:3.12-slim`.
+- Deployment — **Hetzner Cloud** (~€4–5/month). Docker Compose, `restart: always`. A simple watchtower for auto-updates from the registry (optional).
+- CI/CD — **GitHub Actions**: lint → tests → docker build → push to GHCR → ssh-deploy (via `appleboy/ssh-action` or watchtower).
 
-### Сводная таблица
+### Summary table
 
-| Слой | MVP | v1.1+ |
-|------|-----|-------|
+| Layer | MVP | v1.1+ |
+|-------|-----|-------|
 | Bot framework | aiogram 3.x | aiogram 3.x |
 | HTTP | httpx + tenacity + aiolimiter | + pybreaker |
 | Scheduler | APScheduler async | APScheduler / arq |
-| DB | SQLite + aiosqlite | PostgreSQL + asyncpg (опц. TimescaleDB) |
-| ORM | SQLAlchemy 2.x async + Alembic | то же |
+| DB | SQLite + aiosqlite | PostgreSQL + asyncpg (opt. TimescaleDB) |
+| ORM | SQLAlchemy 2.x async + Alembic | same |
 | Cache | aiocache (in-memory) | Redis |
-| Config | pydantic-settings | то же |
+| Config | pydantic-settings | same |
 | Logs | structlog (JSON) | structlog + Grafana Loki |
 | Metrics | prometheus-client | + Grafana Cloud |
 | Errors | Sentry | Sentry |
-| Tests | pytest + respx + freezegun | + integration с реальными API в nightly |
-| Deploy | Docker Compose / Hetzner | то же |
+| Tests | pytest + respx + freezegun | + integration against real APIs in nightly |
+| Deploy | Docker Compose / Hetzner | same |
 
 ---
 
-## 10. Эксплуатация и качество
+## 10. Operations and quality
 
-### 10.1. Observability — что и зачем мониторить
+### 10.1. Observability — what and why to monitor
 
-| Сигнал | Источник | Алерт |
-|--------|----------|-------|
-| Бот жив | `/health` 200/503 | UptimeRobot — алерт после 2 пропусков |
-| Адаптер «потух» | Circuit breaker open + Sentry | Sentry email |
-| Квота источника < 20% | `warden_adapter_quota_remaining` | Telegram-сообщение владельцу из самого бота |
-| Цикл проверки > 5 мин | `scheduler_runs.finished_at - started_at` | Sentry-event |
-| Алертов 0 за 48 часов на active-подписку | агрегат по `alerts_sent` | Telegram-сообщение «подозрительная тишина» |
-| Размер БД > 1 GB | `warden_db_size_bytes` | Telegram-сообщение, проверить retention |
-| FX-курс stale > 3 дня | `fx_rates.fetched_at` | Sentry |
+| Signal | Source | Alert |
+|--------|--------|-------|
+| Bot alive | `/health` 200/503 | UptimeRobot — alert after 2 missed checks |
+| Adapter "down" | Circuit breaker open + Sentry | Sentry email |
+| Source quota < 20% | `warden_adapter_quota_remaining` | Telegram message to the owner from the bot itself |
+| Check cycle > 5 min | `scheduler_runs.finished_at - started_at` | Sentry event |
+| 0 alerts in 48 hours on an active subscription | `alerts_sent` aggregate | Telegram "suspicious silence" message |
+| DB size > 1 GB | `warden_db_size_bytes` | Telegram message, check retention |
+| FX rate stale > 3 days | `fx_rates.fetched_at` | Sentry |
 
-«Self-alerts» через тот же Telegram — бот может писать сам себе. Удобно для personal-сервиса без отдельной alertmanager-инфры.
+"Self-alerts" via the same Telegram chat — the bot can DM itself. Convenient for a personal service without a separate alertmanager infrastructure.
 
-### 10.2. Тестовая стратегия
+### 10.2. Testing strategy
 
-**Уровни:**
+**Levels:**
 
-1. **Unit** — чистые функции: Alert Engine стратегии, Currency Normalizer, Aggregator dedup. Быстрые (< 1 сек на сюиту), без I/O. `freezegun` для time-зависимых.
-2. **Контрактные тесты адаптеров** — фикстуры с записанными ответами реальных API в `tests/fixtures/{source}/`. `respx` подставляет их вместо httpx. Тест: «парсинг ответа → ожидаемый список `Flight`». Ломается, если внешний API меняет схему.
-3. **Integration тесты** — на реальных API, но только в **nightly job** в CI (не на каждый PR), чтобы не сжигать квоты. Помечены `@pytest.mark.integration`.
-4. **End-to-end** — мини-сценарий: создать подписку через aiogram-тест-клиент → дёрнуть один цикл → проверить, что в БД появилось наблюдение и (опц.) алерт. Использует **временную SQLite-БД**.
+1. **Unit** — pure functions: Alert Engine strategies, Currency Normalizer, Aggregator dedup. Fast (< 1 s per suite), no I/O. `freezegun` for time-sensitive tests.
+2. **Adapter contract tests** — fixtures with recorded real API responses in `tests/fixtures/{source}/`. `respx` swaps them in for httpx. Test: "parse response → expected Flight list". Breaks when the external API changes its schema.
+3. **Integration tests** — against real APIs, but only in a **nightly CI job** (not per PR) to avoid burning quotas. Marked `@pytest.mark.integration`.
+4. **End-to-end** — a mini scenario: create a subscription via an aiogram test client → run one cycle → assert that an observation (and optionally an alert) appeared in the DB. Uses a **temporary SQLite DB**.
 
-**Замены:**
+**Doubles:**
 
 - Telegram API — `aiogram.test` (fake bot).
-- БД — отдельный файл per-test или in-memory SQLite.
-- Время — `freezegun`.
+- DB — per-test file or in-memory SQLite.
+- Time — `freezegun`.
 - HTTP — `respx`.
 
 ### 10.3. CI/CD
 
-**На каждый PR:**
+**On every PR:**
 
 - `ruff check` + `ruff format --check`
 - `mypy src/`
 - `pytest -m "not integration"` + coverage > 75%
-- Build Docker-образа (без push)
+- Docker image build (without push)
 
-**На merge в `main`:**
+**On merge to `main`:**
 
-- Полный pipeline выше
-- Push Docker-образа в GHCR с тегами `main` и `sha-XXX`
-- SSH-деплой на VPS: `docker compose pull && docker compose up -d`
-- Smoke-test: HTTP `/health` отвечает 200 в течение 30 сек после рестарта.
+- The full pipeline above
+- Push the Docker image to GHCR with tags `main` and `sha-XXX`
+- SSH deploy to the VPS: `docker compose pull && docker compose up -d`
+- Smoke test: HTTP `/health` returns 200 within 30 s after restart.
 
 **Nightly:**
 
-- `pytest -m integration` с реальными API.
-- Проверка свежести FX-курсов.
-- Backup SQLite в S3 / отдельный том.
+- `pytest -m integration` against real APIs.
+- FX-rate freshness check.
+- SQLite backup to S3 / a separate volume.
 
-### 10.4. Безопасность
+### 10.4. Security
 
-- **Whitelist пользователей** через middleware aiogram.
-- **Секреты** — только через env / Docker secrets, никогда не в git. `.env.example` без значений.
-- **`.gitignore`** покрывает `.env`, `*.sqlite`, `*.db`, локальные кэши.
-- **Telegram bot token** при компрометации регенерируется через @BotFather.
-- **Input validation** — Pydantic-схемы для всех команд бота (IATA-коды по регулярке, даты через `date.fromisoformat`).
-- **SQL injection** — не используется raw SQL в логике, всё через SQLAlchemy ORM/Core.
-- **Dependency audit** — `pip-audit` в CI, алерт на CVE.
-- **Backup** — раз в сутки SQLite copy в S3 (Hetzner Storage Box ~€3/мес за 1 ТБ).
+- **User whitelist** via aiogram middleware.
+- **Secrets** — only via env / Docker secrets, never in git. `.env.example` without values.
+- **`.gitignore`** covers `.env`, `*.sqlite`, `*.db`, local caches.
+- **Telegram bot token** is rotated via @BotFather if compromised.
+- **Input validation** — Pydantic schemas for every bot command (IATA codes by regex, dates via `date.fromisoformat`).
+- **SQL injection** — no raw SQL in business logic, everything goes through SQLAlchemy ORM/Core.
+- **Dependency audit** — `pip-audit` in CI, alert on CVEs.
+- **Backup** — once-a-day SQLite copy to S3 (Hetzner Storage Box ~€3/month for 1 TB).
 
-### 10.5. Структура репозитория
+### 10.5. Repository layout
 
 ```
 warden/
@@ -851,48 +851,49 @@ warden/
   README.md
 ```
 
-Hexagonal-структура (`domain` ничего не знает про БД и httpx, `adapters`/`infrastructure` — про детали).
+A hexagonal layout (`domain` knows nothing about the DB or httpx; `adapters` / `infrastructure` carry the implementation details).
 
 ---
 
-## 11. Rate limits и квоты источников (черновик)
+## 11. Source rate limits and quotas (draft)
 
-| Источник | Quota | Rate limit | Источник данных | Заметки |
-|----------|-------|------------|-----------------|---------|
-| **Aviasales / Travelpayouts** | без хард-лимита | ~1 RPS рекомендовано | docs.travelpayouts.com | Подтвердить актуальные числа при регистрации |
-| **Kiwi Tequila** | (deprecated?) | 0.5 RPS | tequila.kiwi.com | **Проверить статус API в 2026** |
-| **Ryanair (services-api)** | неофициальный | низкая нагрузка | reverse-engineered | Риск бана при злоупотреблении |
-| **Amadeus self-service** | 2000 req/мес (test) | 10 RPS | developers.amadeus.com | Production tier — платный |
-| **Duffel** | до 1000 req/час test | — | duffel.com/docs | Test environment бесплатно |
-| **ECB FX rates** | без лимита | вежливо: 1 запрос/сутки | www.ecb.europa.eu | XML-фид, обновляется ~16:00 CET в будни |
+| Source | Quota | Rate limit | Documentation | Notes |
+|--------|-------|------------|---------------|-------|
+| **Aviasales / Travelpayouts** | no hard limit | ~1 RPS recommended | docs.travelpayouts.com | Confirm current numbers at signup |
+| **Kiwi Tequila** | (deprecated?) | 0.5 RPS | tequila.kiwi.com | **Verify API status in 2026** |
+| **Ryanair (services-api)** | unofficial | low load | reverse-engineered | Ban risk on abuse |
+| **Amadeus self-service** | 2000 req/month (test) | 10 RPS | developers.amadeus.com | Production tier is paid |
+| **Duffel** | up to 1000 req/hour test | — | duffel.com/docs | Test environment is free |
+| **ECB FX rates** | unlimited | politely: 1 request/day | www.ecb.europa.eu | XML feed, refreshed around 16:00 CET on business days |
 
-**Все значения — ориентировочные.** Перед каждым запуском в прод — сверка с актуальной документацией источника. Запись фактических `rate_limit_remaining` в `api_call_log` даёт реальную картину.
+**All values are approximate.** Before each production launch — cross-check with the source's current documentation. Recording the actual `rate_limit_remaining` into `api_call_log` gives the real picture.
 
 ---
 
 ## 12. Changelog
 
-- **0.2 — 2026-05-23.** Уточнён стек (aiogram 3.x, SQLAlchemy 2.x async, Alembic, pydantic-settings, structlog, Sentry, Prometheus). Добавлены компоненты: Cache Layer, Currency Normalizer, Observability. Уточнены: idempotent UNIQUE в `price_observations`, outlier-detection, dry-run для подписок, TZ-обработка через `zoneinfo` + `airportsdata`. Добавлены разделы: §9 Стек, §10 Эксплуатация (observability/tests/CI/CD/security/структура репо), §11 Rate limits. Расширены риски (FX, deprecation Kiwi). Закрыты open questions по деплою (Hetzner) и webhook vs polling (polling).
-- **0.1 — 2026-05-21.** Первоначальный draft: архитектура, схема БД, MVP-план, риски, open questions.
+- **0.3 — 2026-05-23.** Translated the document from Russian to English. No content changes.
+- **0.2 — 2026-05-23.** Clarified the stack (aiogram 3.x, SQLAlchemy 2.x async, Alembic, pydantic-settings, structlog, Sentry, Prometheus). Added components: Cache Layer, Currency Normalizer, Observability. Specified: idempotent UNIQUE on `price_observations`, outlier detection, dry-run for subscriptions, TZ handling via `zoneinfo` + `airportsdata`. Added sections: §9 Stack, §10 Operations (observability/tests/CI/CD/security/repo layout), §11 Rate limits. Risks expanded (FX, Kiwi deprecation). Open questions on deployment (Hetzner) and webhook vs polling (polling) closed.
+- **0.1 — 2026-05-21.** Initial draft: architecture, DB schema, MVP plan, risks, open questions.
 
 ---
 
-## 13. Глоссарий
+## 13. Glossary
 
-- **GDS** — Global Distribution System. Amadeus, Sabre, Travelport. Системы, через которые работают традиционные авиакомпании.
-- **OTA** — Online Travel Agency. Kiwi, Trip.com, Booking-style продавцы билетов.
-- **IATA-код** — трёхбуквенный код аэропорта (BEG, BCN, BUD).
-- **Round-trip** — туда-обратно одним билетом.
-- **Open-jaw** — туда в один город, обратно из другого.
-- **Multi-city** — несколько сегментов в разных направлениях.
-- **Virtual interlining** — стыковка рейсов разных авиакомпаний, которые формально не связаны. Фича Kiwi.
-- **Метапоиск** — агрегатор, который не продаёт билеты сам, а перенаправляет на источник (Aviasales, Skyscanner).
-- **FSM** — Finite State Machine. В aiogram — механизм для пошаговых диалогов (создание подписки через несколько вопросов).
-- **FX** — foreign exchange. В контексте бота — валютные курсы для нормализации цен в EUR.
-- **Circuit breaker** — паттерн отказоустойчивости: после N подряд провалов внешнего сервиса автоматически «открывает цепь» на cooldown-период, не тратя запросы впустую.
-- **Token bucket** — алгоритм rate limiting: токены пополняются с заданной скоростью, каждый запрос «съедает» токен.
-- **Idempotency** — свойство операции, при котором повтор не меняет результата. Реализуется через UNIQUE-индексы в БД.
-- **Outlier** — статистический выброс. В контексте — подозрительная цена, не участвующая в агрегатах истории.
-- **Downsampling** — снижение частоты точек временного ряда (например, час → сутки) для экономии места.
-- **Dry-run** — режим, при котором операция выполняется, но не имеет побочных эффектов. Для подписок — алерт пишется в БД, но не отправляется.
-- **TZ-aware datetime** — момент времени с явной timezone-привязкой, в отличие от «голого» datetime.
+- **GDS** — Global Distribution System. Amadeus, Sabre, Travelport. The systems through which traditional airlines operate.
+- **OTA** — Online Travel Agency. Kiwi, Trip.com, Booking-style ticket sellers.
+- **IATA code** — the three-letter airport code (BEG, BCN, BUD).
+- **Round-trip** — there-and-back on a single ticket.
+- **Open-jaw** — out into one city, back from another.
+- **Multi-city** — several segments in different directions.
+- **Virtual interlining** — stitching together flights on airlines that are not formally interlined. A Kiwi feature.
+- **Metasearch** — an aggregator that does not sell tickets itself but redirects to the source (Aviasales, Skyscanner).
+- **FSM** — Finite State Machine. In aiogram — the mechanism for step-by-step dialogs (creating a subscription across several questions).
+- **FX** — foreign exchange. In the bot's context — currency rates for normalizing prices to EUR.
+- **Circuit breaker** — a resilience pattern: after N consecutive failures of an external service, it automatically "opens the circuit" for a cooldown period, sparing requests.
+- **Token bucket** — a rate-limiting algorithm: tokens refill at a set rate, each request consumes one.
+- **Idempotency** — the property of an operation where repeating it doesn't change the result. Implemented via UNIQUE indexes in the DB.
+- **Outlier** — a statistical anomaly. In context — a suspicious price that does not participate in history aggregates.
+- **Downsampling** — reducing the sampling frequency of a time series (e.g., hourly → daily) to save storage.
+- **Dry-run** — a mode in which an operation runs but has no side effects. For subscriptions — an alert is written to the DB but not sent.
+- **TZ-aware datetime** — a point in time with an explicit timezone, as opposed to a "naive" datetime.
