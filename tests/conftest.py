@@ -11,9 +11,16 @@ import pytest_asyncio
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import SendMessage, TelegramMethod
+from aiogram.methods import (
+    AnswerCallbackQuery,
+    DeleteMessage,
+    EditMessageReplyMarkup,
+    EditMessageText,
+    SendMessage,
+    TelegramMethod,
+)
 from aiogram.methods.base import Response, TelegramType
-from aiogram.types import Chat, Message, Update, User
+from aiogram.types import CallbackQuery, Chat, Message, Update, User
 from alembic import command
 from alembic.config import Config as AlembicConfig
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -22,12 +29,23 @@ from warden.bot.dispatcher import make_dispatcher
 from warden.bot.handlers import common, search, subscriptions
 from warden.config import Settings, get_settings
 from warden.infrastructure import db as db_module
+from warden.services.subscription_manager import SubscriptionManager
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ALEMBIC_INI = PROJECT_ROOT / "alembic.ini"
 
 ALLOWED_USER_ID = 111
 DENIED_USER_ID = 999
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ignore any developer-local .env in the project root for every test.
+
+    Otherwise it leaks into Settings (e.g. an empty SENTRY_DSN= or a real
+    BOT_TOKEN) and makes config tests non-deterministic across machines.
+    """
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
 
 
 @pytest.fixture
@@ -88,15 +106,17 @@ class MockedSession(BaseSession):
         timeout: int | None = None,
     ) -> TelegramType:
         self.calls.append(method)
-        if isinstance(method, SendMessage):
+        if isinstance(method, SendMessage | EditMessageText):
             return Message.model_validate(  # type: ignore[return-value]
                 {
                     "message_id": len(self.calls),
                     "date": 0,
-                    "chat": {"id": method.chat_id, "type": "private"},
+                    "chat": {"id": method.chat_id or 0, "type": "private"},
                     "text": method.text,
                 }
             )
+        if isinstance(method, EditMessageReplyMarkup | AnswerCallbackQuery | DeleteMessage):
+            return True  # type: ignore[return-value]
         # default empty success response object — good enough for stubs
         return Response[TelegramType](ok=True, result=None).result  # type: ignore[return-value]
 
@@ -182,3 +202,69 @@ def make_update() -> Iterator[Any]:
         return Update(update_id=n, message=message)
 
     yield _factory
+
+
+@pytest.fixture
+def make_callback() -> Iterator[Any]:
+    """Factory: build an Update wrapping a CallbackQuery on a bot-authored message."""
+    counter = {"n": 0}
+
+    def _factory(data: str, user_id: int = ALLOWED_USER_ID) -> Update:
+        counter["n"] += 1
+        n = counter["n"]
+        from datetime import datetime
+
+        user = User(id=user_id, is_bot=False, first_name="Test", username="test")
+        chat = Chat(id=user_id, type="private")
+        bot_user = User(id=42, is_bot=True, first_name="Warden", username="warden_bot")
+        message = Message.model_validate(
+            {
+                "message_id": n,
+                "date": datetime.now(tz=UTC),
+                "chat": chat.model_dump(),
+                "from": bot_user.model_dump(),
+                "text": "…",
+            }
+        )
+        callback = CallbackQuery.model_validate(
+            {
+                "id": str(n),
+                "from": user.model_dump(),
+                "chat_instance": "test-instance",
+                "message": message.model_dump(),
+                "data": data,
+            }
+        )
+        return Update(update_id=n, callback_query=callback)
+
+    yield _factory
+
+
+@pytest_asyncio.fixture
+async def manager(engine: AsyncEngine) -> SubscriptionManager:
+    """SubscriptionManager backed by the migrated test DB for direct service tests."""
+    return SubscriptionManager(db_module.make_sessionmaker(engine))
+
+
+@pytest.fixture
+def texts(bot: Bot) -> list[str]:
+    """All text-bearing outgoing calls (SendMessage + EditMessageText) in call order."""
+    session = bot.session
+    assert isinstance(session, MockedSession)
+
+    class _View(list[str]):
+        def _items(self) -> list[str]:
+            return [
+                m.text or "" for m in session.calls if isinstance(m, SendMessage | EditMessageText)
+            ]
+
+        def __len__(self) -> int:
+            return len(self._items())
+
+        def __getitem__(self, index: int) -> str:  # type: ignore[override]
+            return self._items()[index]
+
+        def __iter__(self) -> Iterator[str]:  # type: ignore[override]
+            return iter(self._items())
+
+    return _View()
