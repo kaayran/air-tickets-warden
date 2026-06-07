@@ -18,6 +18,8 @@ dependencies = [
     "prometheus-client>=0.20",
     "aiohttp>=3.9",
     "sentry-sdk[aiohttp,sqlalchemy]>=1.40",
+    "airportsdata>=20260315",
+    "aiogram-calendar>=0.5",
 ]
 
 [project.optional-dependencies]
@@ -90,7 +92,7 @@ files = ["src/warden"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["alembic.*"]
+module = ["alembic.*", "aiogram_calendar.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
