@@ -9,6 +9,8 @@ from warden.bot.handlers import common, search, subscriptions
 from warden.bot.middlewares.logging import LoggingMiddleware
 from warden.bot.middlewares.whitelist import WhitelistMiddleware
 from warden.config import Settings
+from warden.infrastructure.db import make_sessionmaker
+from warden.services.subscription_manager import SubscriptionManager
 
 
 def make_bot(settings: Settings) -> Bot:
@@ -30,5 +32,6 @@ def make_dispatcher(settings: Settings, engine: AsyncEngine) -> Dispatcher:
 
     dp["engine"] = engine
     dp["settings"] = settings
+    dp["subscriptions"] = SubscriptionManager(make_sessionmaker(engine))
 
     return dp
