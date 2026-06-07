@@ -1,7 +1,7 @@
 # Air Tickets Warden — Design Document
 
-**Version:** 0.3 (draft)
-**Date:** 2026-05-23
+**Version:** 0.4 (draft)
+**Date:** 2026-05-24
 **Status:** Design
 
 ---
@@ -137,6 +137,29 @@ The user entry point. Implemented on **`aiogram` 3.x** (async-first, built-in FS
 - "Buy" (deep link to the source, optionally with a referral code)
 - "Mute alert for this route"
 - "Lower threshold" / "Ignore for N days"
+
+**Input UX for the `/new` dialog:**
+
+Manual free-text entry (typing IATA codes and `YYYY-MM-DD` dates by hand) is error-prone and unfriendly. The step-by-step `/new` FSM replaces raw text input with guided pickers built on Telegram inline keyboards.
+
+*Airport selection (searchable dropdown):*
+
+- Telegram has no native dropdown widget, so a "dropdown" is emulated with an **inline keyboard** whose buttons are airport candidates.
+- For each airport step (origin, alternatives, destination) the bot first offers a short list of **frequent / recently used airports** as inline buttons (1–2 taps for the common case).
+- For everything else the user **types a city name or partial IATA code**; the bot resolves candidates against the offline **`airportsdata`** dataset (already a dependency for TZ resolution — no extra service) and renders the top matches as inline buttons. Selecting a button advances the FSM; nothing is parsed from free text directly — the chosen IATA code comes from the button `callback_data`.
+- Candidate lists are paginated (e.g. 8 per page with ◀/▶ buttons) when matches exceed one screen. This avoids hitting Telegram's inline-keyboard size limits.
+- Multi-airport / multi-destination steps allow toggling several buttons (checkbox-style ✅) before a "Done" button confirms the set.
+- Validation moves from "regex on a typed string" to "the value can only be a known IATA code from the dataset", which removes a whole class of typo errors.
+
+*Date selection (inline calendar):*
+
+- Date range (`date_from` / `date_to`, optionally `return_date_*`) is collected via an **inline-keyboard calendar** instead of typed `YYYY-MM-DD` strings.
+- Library: **`aiogram3-calendar`** (a.k.a. `aiogram-calendar` for aiogram 3.x) — renders a month grid as an inline keyboard with month/year navigation and emits the picked date through `callback_data`. The alternative — a hand-rolled `InlineKeyboardMarkup` calendar — is rejected as reinventing a maintained widget.
+- The dialog uses a two-tap range flow: first tap picks `date_from`, the calendar re-renders highlighting it, the second tap picks `date_to`. Past dates are disabled; `date_to` is constrained to be ≥ `date_from`.
+- The resulting dates are stored normalized (UTC, see §3.2 Alert Engine — Time zones) regardless of how they were rendered to the user.
+- Free-text date entry remains available as a fallback (parsed via `date.fromisoformat`, see §10.4 Security) for power users and for tests, but the calendar is the default surface.
+
+These pickers are pure presentation over the same FSM states — the Subscription Manager and DB schema are unchanged; only the bot collects values through buttons rather than raw text.
 
 #### Subscription Manager
 
@@ -673,6 +696,8 @@ Every choice comes with rationale. Alternatives are listed where they were actua
 
 - **`aiogram` 3.x** — async-first, FSM out of the box (needed for the step-by-step `/new`), Pydantic update validation, active development.
 - The `python-telegram-bot` alternative — rejected: heavier, more "classical" API.
+- **`aiogram3-calendar`** — inline-keyboard calendar widget for the `/new` date-range steps (avoids manual `YYYY-MM-DD` typing). See §3.2 "Input UX for the `/new` dialog".
+- **`airportsdata`** — also drives the airport-picker dropdown (offline IATA / city search), in addition to its TZ-resolution role.
 
 ### HTTP clients and resilience
 
@@ -872,6 +897,7 @@ A hexagonal layout (`domain` knows nothing about the DB or httpx; `adapters` / `
 
 ## 12. Changelog
 
+- **0.4 — 2026-05-24.** Added "Input UX for the `/new` dialog" (§3.2 Telegram Bot Layer): searchable airport-picker dropdown via inline keyboards over the offline `airportsdata` dataset, and an inline-keyboard calendar (`aiogram3-calendar`) for date-range selection — replacing manual IATA / `YYYY-MM-DD` typing. Stack updated accordingly (§9 Telegram bot).
 - **0.3 — 2026-05-23.** Translated the document from Russian to English. No content changes.
 - **0.2 — 2026-05-23.** Clarified the stack (aiogram 3.x, SQLAlchemy 2.x async, Alembic, pydantic-settings, structlog, Sentry, Prometheus). Added components: Cache Layer, Currency Normalizer, Observability. Specified: idempotent UNIQUE on `price_observations`, outlier detection, dry-run for subscriptions, TZ handling via `zoneinfo` + `airportsdata`. Added sections: §9 Stack, §10 Operations (observability/tests/CI/CD/security/repo layout), §11 Rate limits. Risks expanded (FX, Kiwi deprecation). Open questions on deployment (Hetzner) and webhook vs polling (polling) closed.
 - **0.1 — 2026-05-21.** Initial draft: architecture, DB schema, MVP plan, risks, open questions.
