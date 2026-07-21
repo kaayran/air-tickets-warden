@@ -1,7 +1,7 @@
 # Air Tickets Warden — Design Document
 
-**Version:** 0.4 (draft)
-**Date:** 2026-05-24
+**Version:** 0.6 (Mini App frontend)
+**Date:** 2026-07-21
 **Status:** Design
 
 ---
@@ -9,6 +9,10 @@
 ## 1. Overview
 
 A Telegram bot for personal monitoring of air ticket prices on any route. The bot operates on a subscription model: the user creates monitoring rules (route + date range + alert conditions), and the bot regularly polls several data sources, aggregates results, maintains a price history, and sends notifications when conditions are met.
+
+The service is written in **Go**: a single static binary, goroutine-based concurrency, and a small, explicit dependency set.
+
+The user-facing UI is a **Telegram Mini App** — a React SPA opened inside Telegram, served over HTTPS by the same Go binary (embedded via `go:embed`). All management (subscriptions, stats, search) happens there. The **bot** is reduced to two roles: the entry point (`/start` + "Open App" button) and the **notification channel** — a Mini App cannot push anything while closed, so alerts are always delivered as bot messages.
 
 ### Key principles
 
@@ -44,12 +48,13 @@ A single person (the bot owner) or a small circle of acquaintances. Not a public
 
 ### Technology assumptions
 
-- **Python 3.12+** (for compatibility with `ryanair-py` and the async ecosystem).
-- **Async-first**: aiogram 3.x, httpx, aiosqlite / asyncpg. A single event loop, no worker pool.
+- **Go 1.24+**. A single static binary; goroutines + channels as the concurrency model, `context.Context` cancellation everywhere.
 - A single bot instance, no horizontal scaling.
-- **SQLite (via `aiosqlite`) for MVP**, migration to **PostgreSQL (via `asyncpg`)** when volume grows. Alembic migrations from day one.
-- Deployment on a VPS — **Hetzner Cloud (~€4–5/month)** as the reference. Railway / Fly.io are possible, but free tiers are unreliable for 24/7 operation.
-- Containerization — **Docker + docker-compose** from MVP; simplifies migration and local dev.
+- **PostgreSQL 16 from day one** (via `pgx` v5). Running Postgres in Docker Compose costs nothing operationally, and skipping the SQLite stage removes a whole migration project later. Migrations with `goose` from the first revision.
+- **Telegram Mini App as the only management UI.** Requires a public HTTPS URL (Telegram opens Mini Apps only over HTTPS) — TLS is terminated by a Caddy sidecar in docker-compose (automatic Let's Encrypt). For local development, a tunnel (cloudflared / ngrok) exposes the dev server to Telegram. The exact domain is an open question (§8).
+- Frontend: **React 19 + TypeScript + Vite**, built to static assets and embedded into the Go binary with `go:embed` — one deploy artifact, no CORS, no separate frontend pipeline.
+- Deployment on a VPS — **Hetzner Cloud (~€4–5/month)** as the reference.
+- Containerization — **Docker + docker-compose** from MVP; the app image is a multi-stage build (node builder → go builder → distroless) with a single binary.
 
 The full stack with rationale — see §9 "Technology stack".
 
@@ -60,21 +65,29 @@ The full stack with rationale — see §9 "Technology stack".
 ### 3.1. High-level diagram
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      Telegram Bot Layer                          │
-│  (commands, inline buttons, notification formatting)             │
+┌───────────────────────────────┐   ┌─────────────────────────────┐
+│    Telegram Mini App (React)   │   │  Telegram Bot               │
+│  subscriptions CRUD, stats,    │   │  entry point ("Open App"),  │
+│  search, settings              │   │  alert delivery, inline     │
+│  (static files ← go:embed)     │   │  buttons on notifications   │
+└───────────────┬───────────────┘   └──────────────┬──────────────┘
+                │ JSON API (initData auth)          │
+                ▼                                   │
+┌───────────────────────────────────────────────────┴─────────────┐
+│                        HTTP API Layer                            │
+│      (REST /api/v1, initData validation, whitelist)              │
 └──────────────────────────┬──────────────────────────────────────┘
                            │
                            ▼
             ┌──────────────────────────┐
             │  Subscription Manager    │ ←──→  ┌──────────┐
-            │  (CRUD over rules)       │       │   DB     │
+            │  (CRUD over rules)       │       │ Postgres │
             └──────────────┬───────────┘       └──────────┘
                            │
                            ▼
             ┌──────────────────────────┐
             │      Scheduler           │
-            │  (cron + priorities)     │
+            │  (ticker + priorities)   │
             └──────────────┬───────────┘
                            │
                            ▼
@@ -112,58 +125,74 @@ The full stack with rationale — see §9 "Technology stack".
             └──────────────────────────┘
 ```
 
+All components live in one process. Concurrency boundaries: the bot's update loop, the HTTP server (API + static files), the scheduler loop, and per-check-cycle fan-out to adapters (an `errgroup` per cycle).
+
 ### 3.2. Components
+
+#### Mini App Frontend
+
+The management UI. A **React 19 + TypeScript** SPA built with **Vite**, opened inside Telegram as a Mini App (attachment-menu button / `/start` button / direct `t.me/<bot>/<app>` link).
+
+- **`@telegram-apps/sdk-react`** — typed bindings to the Mini App platform: `initData`, theme params, viewport, BackButton, MainButton, haptic feedback.
+- **`@telegram-apps/telegram-ui`** — Telegram-native UI kit (cells, lists, modals, tabbar); the app inherits the user's Telegram theme (light/dark, accent colors) automatically.
+- **TanStack Query** for API state (fetch/cache/invalidate); no global state manager beyond it — the app is CRUD-shaped.
+- Screens:
+  - **Subscriptions** — list with status badges; swipe/menu actions (pause, resume, delete).
+  - **New/Edit subscription** — a real form at last: airport autocomplete (backed by `GET /api/v1/airports?q=`), native-feeling date-range picker, sliders/steppers for thresholds, toggles for alternative airports. Everything the old inline-keyboard FSM emulated poorly, done as normal web UI.
+  - **Subscription detail / stats** — price history chart (lightweight charting lib, e.g. `recharts`), min/avg/trend, recent alerts, "check now" button.
+  - **Settings** — defaults (cooldown, drop %), mute list.
+- Built assets land in `web/dist/` and are **embedded into the Go binary via `go:embed`** — the same server serves `/` (SPA) and `/api/v1` (JSON). One artifact, no CORS, no separate frontend deploy.
+
+#### HTTP API Layer
+
+A JSON REST API under `/api/v1`, served by `net/http` (Go 1.22+ pattern routing — no router dependency) in the same process.
+
+**Authentication — Telegram `initData`:** every request carries the raw `initData` string (an `Authorization: tma <initData>` header) that Telegram injects into the Mini App. The server validates its HMAC-SHA256 signature against the bot token (the documented Mini App validation scheme, via `init-data-golang`), checks `auth_date` freshness (≤ 24 h), and extracts the authenticated `user.id`. No sessions, no passwords — Telegram is the identity provider.
+
+**Authorization:** the extracted user id must be in `ALLOWED_USER_IDS` — the same whitelist as the bot, enforced as API middleware. Every handler scopes queries by the authenticated `user_chat_id`; object ownership is checked on each mutation.
+
+**Endpoints (v1):**
+
+```
+GET    /api/v1/me                        — profile, defaults
+GET    /api/v1/subscriptions             — list (with brief status)
+POST   /api/v1/subscriptions             — create
+GET    /api/v1/subscriptions/{id}        — detail
+PATCH  /api/v1/subscriptions/{id}        — edit / pause / resume / dry-run toggle
+DELETE /api/v1/subscriptions/{id}        — delete
+POST   /api/v1/subscriptions/{id}/check  — ad-hoc check (replaces /search; async, 202)
+GET    /api/v1/subscriptions/{id}/stats  — history aggregates + chart series
+GET    /api/v1/subscriptions/{id}/alerts — recent alerts
+GET    /api/v1/airports?q=<text>         — autocomplete over the embedded dataset
+GET    /api/v1/health-summary            — adapter aliveness, last cycle (the old /health command)
+```
+
+Input validation server-side as before: IATA codes must exist in the airports dataset, dates parsed with `time.Parse`, ranges checked in the domain layer. The Mini App is a convenience, not a trust boundary.
 
 #### Telegram Bot Layer
 
-The user entry point. Implemented on **`aiogram` 3.x** (async-first, built-in FSM for the step-by-step `/new` dialog, Pydantic validation of updates).
+Reduced to **entry point + notification channel**. Implemented on **`go-telegram/bot`** (zero-dependency, actively maintained, full Bot API coverage, middleware). No FSM, no dialog flows — all input UX lives in the Mini App.
 
-**Transport:** long-polling (simpler for a personal bot — no ingress, no TLS, identical between local dev and prod). Webhook only worth considering if traffic grows.
+**Transport:** long-polling for updates (simpler for a personal bot; the HTTPS ingress required by the Mini App serves the API/static only — bot updates don't need a webhook).
 
-**User whitelist:** a startup middleware checks `chat_id` against `ALLOWED_USER_IDS` from the config. Anything else is dropped without a reply. The bot is formally public on Telegram, and without a filter random users can burn external API quotas.
+**User whitelist:** a middleware checks `chat_id` against `ALLOWED_USER_IDS`. Anything else is dropped without a reply.
 
-**Commands:**
+**Commands (complete list):**
 
-- `/new` — dialog to create a new subscription (origin/destination/date range/flexibility/threshold).
-- `/list` — list of active subscriptions with brief status.
-- `/pause <id>`, `/resume <id>`, `/delete <id>` — manage subscriptions.
-- `/search <id>` — ad-hoc manual check.
-- `/stats <id>` — price history for a subscription: current minimum, average, min over 30/60 days, trend.
-- `/help` — help text.
+- `/start` — greeting + a `web_app` keyboard button "Open App"; the bot's menu button is also configured (via BotFather / `setChatMenuButton`) to open the Mini App.
+- `/help` — one screen of text pointing to the Mini App.
 
-**Inline buttons in notifications:**
+**Notifications:** the bot's main job. Alert messages with inline buttons:
 
-- "View details" (expands segments, layovers, duration)
 - "Buy" (deep link to the source, optionally with a referral code)
-- "Mute alert for this route"
-- "Lower threshold" / "Ignore for N days"
+- "Details" / "Stats" — a `web_app` button opening the Mini App directly on the subscription's detail screen (start-parameter deep link)
+- "Mute alert for this route" — one-tap callback handled by the bot (no need to open the app for the common reaction)
 
-**Input UX for the `/new` dialog:**
-
-Manual free-text entry (typing IATA codes and `YYYY-MM-DD` dates by hand) is error-prone and unfriendly. The step-by-step `/new` FSM replaces raw text input with guided pickers built on Telegram inline keyboards.
-
-*Airport selection (searchable dropdown):*
-
-- Telegram has no native dropdown widget, so a "dropdown" is emulated with an **inline keyboard** whose buttons are airport candidates.
-- For each airport step (origin, alternatives, destination) the bot first offers a short list of **frequent / recently used airports** as inline buttons (1–2 taps for the common case).
-- For everything else the user **types a city name or partial IATA code**; the bot resolves candidates against the offline **`airportsdata`** dataset (already a dependency for TZ resolution — no extra service) and renders the top matches as inline buttons. Selecting a button advances the FSM; nothing is parsed from free text directly — the chosen IATA code comes from the button `callback_data`.
-- Candidate lists are paginated (e.g. 8 per page with ◀/▶ buttons) when matches exceed one screen. This avoids hitting Telegram's inline-keyboard size limits.
-- Multi-airport / multi-destination steps allow toggling several buttons (checkbox-style ✅) before a "Done" button confirms the set.
-- Validation moves from "regex on a typed string" to "the value can only be a known IATA code from the dataset", which removes a whole class of typo errors.
-
-*Date selection (inline calendar):*
-
-- Date range (`date_from` / `date_to`, optionally `return_date_*`) is collected via an **inline-keyboard calendar** instead of typed `YYYY-MM-DD` strings.
-- Library: **`aiogram3-calendar`** (a.k.a. `aiogram-calendar` for aiogram 3.x) — renders a month grid as an inline keyboard with month/year navigation and emits the picked date through `callback_data`. The alternative — a hand-rolled `InlineKeyboardMarkup` calendar — is rejected as reinventing a maintained widget.
-- The dialog uses a two-tap range flow: first tap picks `date_from`, the calendar re-renders highlighting it, the second tap picks `date_to`. Past dates are disabled; `date_to` is constrained to be ≥ `date_from`.
-- The resulting dates are stored normalized (UTC, see §3.2 Alert Engine — Time zones) regardless of how they were rendered to the user.
-- Free-text date entry remains available as a fallback (parsed via `date.fromisoformat`, see §10.4 Security) for power users and for tests, but the calendar is the default surface.
-
-These pickers are pure presentation over the same FSM states — the Subscription Manager and DB schema are unchanged; only the bot collects values through buttons rather than raw text.
+Self-alerts (quota low, DB big, suspicious silence — §10.1) go through the same channel.
 
 #### Subscription Manager
 
-A CRUD layer over monitoring rules. A subscription consists of:
+A CRUD layer over monitoring rules, backed by `sqlc`-generated queries. A subscription consists of:
 
 | Field | Description |
 |-------|-------------|
@@ -190,13 +219,13 @@ Runs subscription check jobs. Not a flat cron — prioritized by date proximity:
 - **Medium** (15–60 days) — every 4 hours
 - **Low** (60+ days) — once a day
 
-**Implementation:** **APScheduler 3.x** in `AsyncIOScheduler` mode. Sufficient for a single instance and does not pull in Redis. Moving to `arq` only makes sense if Redis appears for caching.
+**Implementation:** a hand-rolled, **stateless, DB-driven scheduler** instead of a job-queue library. Each subscription row carries `next_check_at`; a single goroutine wakes on a `time.Ticker` (every minute), selects due subscriptions (`WHERE next_check_at <= now() AND status = 'active'`), runs a check cycle for each, and writes the next `next_check_at` according to the priority tier. This gives job persistence for free (state lives in Postgres, survives restart), needs no external queue, and is ~100 lines of Go. Libraries considered — `gocron`, `robfig/cron` — rejected: they add in-memory job state that would need re-syncing with the DB anyway.
 
-**Rate limiting:** each source gets its own **`aiolimiter.AsyncLimiter`** (token bucket) at the adapter level. The scheduler does not know about external API limits — it only triggers jobs; quota handling is delegated to adapters.
+**Concurrency:** check cycles for due subscriptions run concurrently, bounded by a semaphore (`golang.org/x/sync/semaphore`, e.g. max 3 concurrent cycles). Inside one cycle, adapter calls fan out via `errgroup.WithContext`.
 
-**Jittering:** a random 0–60 second offset is added when scheduling jobs, so that all subscriptions don't fire at the same minute in a burst.
+**Rate limiting:** each source gets its own **`golang.org/x/time/rate.Limiter`** (token bucket) at the adapter level. The scheduler does not know about external API limits — quota handling is delegated to adapters.
 
-**Job persistence:** SQLAlchemyJobStore over the same DB — jobs survive restart.
+**Jittering:** a random 0–60 second offset is added to `next_check_at`, so subscriptions don't fire in a burst at the same minute.
 
 #### Multi-Airport Expander
 
@@ -217,38 +246,47 @@ The transfer reference table is configurable per subscription (mode, approximate
 
 #### Source Adapters
 
-Each source is a separate module with the same interface:
+Each source is a separate package implementing the same interface:
 
-```
-search(origin, destination, date_from, date_to, options) -> List[Flight]
+```go
+type Adapter interface {
+    Name() string
+    Search(ctx context.Context, q Query) ([]Flight, error)
+}
+
+type Query struct {
+    Origin, Destination string    // IATA
+    DateFrom, DateTo    time.Time
+    Options             SearchOptions
+}
 ```
 
-Where `Flight` is a normalized object:
+Where `Flight` is a normalized struct:
 
-```
-Flight {
-  source: str            # 'aviasales' | 'kiwi' | 'ryanair'
-  price: float
-  currency: str
-  origin: str            # IATA
-  destination: str       # IATA
-  departure_at: datetime # in the airport's timezone
-  arrival_at: datetime
-  segments: List[Segment]
-  airline: str           # primary carrier code
-  flight_number: str
-  stops: int
-  duration_minutes: int
-  booking_url: str
-  fetched_at: datetime
+```go
+type Flight struct {
+    Source          string    // "aviasales" | "kiwi" | "ryanair"
+    Price           float64
+    Currency        string
+    Origin          string    // IATA
+    Destination     string    // IATA
+    DepartureAt     time.Time // in the airport's timezone
+    ArrivalAt       time.Time
+    Segments        []Segment
+    Airline         string    // primary carrier code
+    FlightNumber    string
+    Stops           int
+    DurationMinutes int
+    BookingURL      string
+    FetchedAt       time.Time
 }
 ```
 
 **Initial set of adapters:**
 
 1. **Aviasales / Travelpayouts adapter** — the foundation. Free API, good coverage of Air Serbia, traditional carriers, partially Wizz Air. The affiliate program provides referral links.
-2. **Kiwi (Tequila) adapter** — better for low-cost carriers, supports virtual interlining (Kiwi stitches together flights from different carriers, which traditional GDSs do not). Important for non-standard routes.
-3. **Ryanair adapter** — via the `ryanair-py` library, which uses the semi-official `services-api.ryanair.com` endpoint. Covers only Ryanair, but critical when that carrier is not visible in Aviasales.
+2. **Kiwi (Tequila) adapter** — better for low-cost carriers, supports virtual interlining. Important for non-standard routes.
+3. **Ryanair adapter** — a direct client for the semi-official `services-api.ryanair.com` endpoint (no Go library exists — the `ryanair-py` request/response shapes serve as the reference for a hand-written client). Covers only Ryanair, but critical when that carrier is not visible in Aviasales.
 
 **Optional extended set:**
 
@@ -257,25 +295,25 @@ Flight {
 
 **Standard adapter implementation:**
 
-- HTTP client — **`httpx.AsyncClient`** with a persistent connection pool.
-- Retry — **`tenacity`** with exponential backoff on 429/5xx (3 attempts, jitter).
-- Rate limit — **`aiolimiter`** (token bucket), parameters per source come from the config.
-- **Circuit breaker** — `pybreaker` (or a custom counter): after N consecutive failures a source is "tripped" for a cooldown period. Logged to `api_call_log`, separate metric. Protects against quota burn and cycle hangs.
-- **Sanity check at the adapter output:** price < `MIN_REASONABLE_PRICE` (e.g., €10) or > `MAX_REASONABLE_PRICE` (€5000) → flagged, not passed to the aggregator, written to the log. Defends against "broken €1 prices" and Wizz parsing outliers.
+- HTTP client — a shared `*http.Client` with a tuned `Transport` (connection pool, timeouts). No third-party HTTP wrapper.
+- Retry + circuit breaker — **`failsafe-go`**: exponential backoff with jitter on 429/5xx (3 attempts), and a circuit breaker that "trips" a source after N consecutive failures for a cooldown period. Logged to `api_call_log`, separate metric. Protects against quota burn.
+- Rate limit — **`x/time/rate`** token bucket, parameters per source come from the config.
+- **Sanity check at the adapter output:** price < `MIN_REASONABLE_PRICE` (e.g., €10) or > `MAX_REASONABLE_PRICE` (€5000) → flagged, not passed to the aggregator, written to the log. Defends against "broken €1 prices" and parsing outliers.
 - Every request is logged to `api_call_log` (endpoint, status, latency, remaining quota, error).
-- A single adapter failure does not crash the whole cycle — `asyncio.gather(..., return_exceptions=True)` at the Aggregator level.
+- A single adapter failure does not crash the whole cycle — the Aggregator collects per-adapter results and errors independently (errgroup with errors captured per goroutine, not propagated as cancellation).
+- Response decoding via typed structs + `encoding/json`; a decode error is an adapter error, not a panic.
 
 **Note on Kiwi Tequila:** the API has been undergoing restructuring; free-tier access has been restricted. **Verify key availability before wiring it into code.** Alternatives: **Duffel** (good API, has a test mode), **FlightAPI.io**, **SerpAPI Google Flights** (paid, but covers Wizz/Ryanair).
 
 #### Cache Layer
 
-Sits between Source Adapters and Aggregator — an adapter-response cache. MVP — **`aiocache` (in-memory)**, growing into **Redis**.
+Sits between Source Adapters and Aggregator — an adapter-response cache. MVP — **in-memory TTL cache** (a small hand-rolled `map` + mutex + janitor goroutine, or `patrickmn/go-cache`; the requirements don't justify ristretto/otter), growing into **Redis** only if a second process ever appears.
 
 **Why it's needed:** with multiple alternative airports × 3 sources × N subscriptions, the same pair (origin→destination, date range) is queried many times per hour. Without a cache, free-tier limits burn out within a day.
 
 **Key:** `(source, origin, destination, date_from, date_to, options_hash)`.
 **TTL:** 15 minutes for high-priority subscriptions, 60 minutes for the rest. Configurable per source.
-**Invalidation:** TTL only. Forced refresh — via the `/refresh <id>` command (same as `/search`, but bypasses the cache).
+**Invalidation:** TTL only. Forced refresh — the "check now" action in the Mini App (`POST /api/v1/subscriptions/{id}/check`) bypasses the cache.
 
 A write to `price_observations` happens **always** (even on a cache hit) so that history has no cache-induced gaps. But `api_call_log` is appended only on a real HTTP request.
 
@@ -285,7 +323,7 @@ Adapters can return prices in different currencies: Aviasales — depending on t
 
 All prices in the system are converted to a **base currency (EUR)** before being written to the Price History Store and compared in the Alert Engine. Otherwise `$87 < €100` → false alert.
 
-**Source of rates:** **ECB daily reference rates** (`https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml`). Free, updated around 16:00 CET on business days.
+**Source of rates:** **ECB daily reference rates** (`https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml`), parsed with `encoding/xml`. Free, updated around 16:00 CET on business days.
 **Rate cache:** the `fx_rates(date, currency, rate_to_eur)` table, refreshed once per day.
 **Fallback:** if the ECB is unreachable, the last known rate from the DB is used (tagged `stale_rate=true` in logs).
 
@@ -303,14 +341,14 @@ Collects results from all adapters, deduplicates, and sorts.
 
 **Aggregator pipeline:**
 
-1. Collect results from all adapters (`asyncio.gather(return_exceptions=True)`).
-2. Currency Normalizer: each `Flight.price` → `Flight.price_eur`.
+1. Collect results from all adapters (concurrent fan-out, per-adapter error isolation).
+2. Currency Normalizer: each `Flight.Price` → `PriceEUR`.
 3. Sanity check (second line — after the adapter): drop flights with `price_eur < €10` or `> €5000` (logged with `outlier=true`).
 4. Add transfer cost for alternative airports.
 5. Deduplicate by `(airline, flight_number, departure_date)`.
 6. Sort by effective price.
 
-The pipeline is idempotent — recomputing on the same Flight set yields the same result.
+The pipeline is a pure function over the collected Flight slice — recomputing on the same input yields the same result.
 
 #### Price History Store
 
@@ -318,18 +356,18 @@ Storage for the price time series. Minimal schema:
 
 ```
 price_observations (
-  id              int pk,
-  route_key       str,        -- 'BEG-BCN-2026-07-15'
-  subscription_id uuid,       -- nullable, tracks which subscription's query produced it
-  price           float,      -- original price
-  currency        str,        -- original currency
-  price_eur       float,      -- normalized to EUR
-  source          str,
-  flight_signature str,       -- airline+flight_number, for flight identification
-  departure_at    timestamp,  -- TZ-aware, departure airport
-  observed_at     timestamp,  -- UTC
+  id              bigint pk,
+  route_key       text,        -- 'BEG-BCN-2026-07-15'
+  subscription_id uuid,        -- nullable, tracks which subscription's query produced it
+  price           numeric,     -- original price
+  currency        text,        -- original currency
+  price_eur       numeric,     -- normalized to EUR
+  source          text,
+  flight_signature text,       -- airline+flight_number, for flight identification
+  departure_at    timestamptz,
+  observed_at     timestamptz, -- UTC
   outlier         bool default false,
-  raw_payload     json
+  raw_payload     jsonb
 )
 
 -- Idempotency: the same flight from the same source within one hour
@@ -350,13 +388,13 @@ INDEX idx_obs_route_signature ON price_observations (route_key, flight_signature
 - Long-term (> 90): 1 point per day + dedup by day
 - 14 days past departure: deletion
 
-Implemented via a periodic job (`apscheduler`, once per day): downsampling + deletion of expired entries.
+Implemented via a periodic job (the same scheduler loop, once per day): downsampling + deletion of expired entries.
 
 **Outlier handling:** at write time, a record is flagged `outlier=true` if its price is more than 3× below the `route_key` median over the last 30 days (provided a sample of at least 20 points exists). Such records **do not participate** in Alert Engine aggregates but stay in the DB for auditing.
 
-**When moving to PostgreSQL** — consider the **TimescaleDB** extension for `price_observations`. Hypertables + automatic downsampling out of the box. Not for MVP, though.
+**Later** — consider the **TimescaleDB** extension for `price_observations`. Hypertables + automatic downsampling out of the box. Not for MVP.
 
-From this data the Alert Engine computes aggregates: moving average, median, minimum over N days.
+From this data the Alert Engine computes aggregates: moving average, median, minimum over N days — as SQL queries (sqlc), not in-process loops.
 
 #### Alert Engine
 
@@ -370,6 +408,8 @@ Decides whether to send a notification. Supports several strategies, selected pe
 | `sudden_drop` | Price dropped by ≥ X% compared to the previous point |
 | `combined` | Any of the above triggers (OR) |
 
+Each strategy is a value implementing a `Strategy` interface (`Evaluate(ctx, flight, history) (Verdict, error)`); `combined` composes them.
+
 **Anti-spam:**
 
 - Cooldown between alerts per subscription (default 6 hours).
@@ -378,17 +418,16 @@ Decides whether to send a notification. Supports several strategies, selected pe
 
 **Decision logging:** every trigger / non-trigger writes a record with input data and the outcome. This is needed for debugging ("why didn't an alert come?").
 
-**Dry-run mode.** A subscription-level flag — `dry_run: bool`. In this mode the Alert Engine runs the whole pipeline but **does not send** to Telegram; it only writes to `alerts_sent` with `dry_run=true`. Used for:
+**Dry-run mode.** A subscription-level flag — `dry_run`. In this mode the Alert Engine runs the whole pipeline but **does not send** to Telegram; it only writes to `alerts_sent` with `dry_run=true`. Used for:
 
-- Tuning new strategies against historical data (CLI replay: `python -m warden.replay --subscription <id> --strategy ...`).
+- Tuning new strategies against historical data (CLI replay: `warden replay --subscription <id> --strategy ...` — a subcommand of the same binary).
 - Silent testing before enabling a new route.
 
 **Time zones (important):**
 
-- Everything in the DB is in UTC (`TIMESTAMP WITH TIME ZONE` on Postgres, ISO-8601 strings with explicit `+00:00` on SQLite).
-- `departure_at` / `arrival_at` are TZ-aware in the airport's zone.
-- Airport TZ resolution — via the **`airportsdata`** package (offline data, no external requests).
-- For Telegram display — convert to the departure airport's TZ via `zoneinfo`.
+- Everything in the DB is `timestamptz` (UTC).
+- `DepartureAt` / `ArrivalAt` are `time.Time` values with the airport's `*time.Location` attached.
+- Airport TZ resolution — from the embedded airports dataset (`go:embed`), locations loaded via `time.LoadLocation`; the `time/tzdata` package is imported so the binary carries its own zone database (works in scratch containers and on Windows).
 - All date comparisons in the Alert Engine are in UTC; formatting happens in the local TZ immediately before sending.
 
 #### Notification Layer
@@ -416,13 +455,15 @@ If flying from an alternative airport is cheaper, a separate note:
    €52 + €25 transfer = €77 effective
 ```
 
+Formatting via `text/template` templates — testable without a live bot.
+
 #### Observability
 
 The bot runs 24/7 unattended — without observability, a downed adapter or a burnt-out quota gets noticed a week later by the silence of alerts.
 
-**Logs:** **`structlog`** in JSON. Each record carries `subscription_id`, `source`, `route_key`, `trace_id` (a UUID for one subscription's check cycle). Log level from config.
+**Logs:** stdlib **`log/slog`** with the JSON handler. Each record carries `subscription_id`, `source`, `route_key`, `trace_id` (a UUID for one subscription's check cycle, propagated via `context`). Log level from config.
 
-**Metrics:** **`prometheus_client`** in pull mode (endpoint `/metrics` on a separate port). Minimal set:
+**Metrics:** **`prometheus/client_golang`** in pull mode (endpoint `/metrics` served by `net/http` on a separate port). Minimal set:
 
 - `warden_adapter_requests_total{source, status}` — counter
 - `warden_adapter_latency_seconds{source}` — histogram
@@ -432,50 +473,53 @@ The bot runs 24/7 unattended — without observability, a downed adapter or a bu
 - `warden_subscriptions_active` — gauge
 - `warden_db_size_bytes` — gauge
 
-Scraping can be done from a sidecar docker service (Grafana Cloud free tier supports scraping by public URL via the agent).
+**Error tracking:** **`sentry-go`**. DSN from env, no-op when empty. The free tier (5K errors/month) covers a personal project with room to spare.
 
-**Error tracking:** **Sentry** (`sentry-sdk` with integrations for httpx, aiogram, SQLAlchemy). DSN from env. The free tier (5K errors/month) covers a personal project with room to spare.
+**Health endpoint:** `/health` returns 200 if the bot is alive and the DB is reachable (`pool.Ping`), otherwise 503. Used for uptime monitoring (UptimeRobot free tier).
 
-**Health endpoint:** `/health` returns 200 if the bot is alive and the DB is reachable, otherwise 503. Used for uptime monitoring (UptimeRobot free tier).
-
-**The `/health` Telegram command** — outputs current state: aliveness of each adapter (from `api_call_log` over the last hour), DB size, number of active subscriptions, last successful check cycle.
+**Health in the Mini App** — a status panel backed by `GET /api/v1/health-summary`: aliveness of each adapter (from `api_call_log` over the last hour), DB size, number of active subscriptions, last successful check cycle.
 
 #### Config & Secrets
 
-Config goes through **`pydantic-settings`**: type-safe, validated at startup, source = env variables + `.env` file locally, secrets via env in prod.
+Config is a plain struct populated from env variables via **`caarlos0/env`**, with `.env` loaded locally by **`godotenv`** (prod uses real env / Docker secrets). Validated at startup — every required field missing → the process exits with a clear message before touching Telegram or the DB.
 
-Grouped by domain:
-
-```python
-class TelegramSettings(BaseSettings):
-    bot_token: SecretStr
-    allowed_user_ids: list[int]
-
-class SourcesSettings(BaseSettings):
-    aviasales_token: SecretStr
-    kiwi_api_key: SecretStr | None
-    amadeus_client_id: SecretStr | None
-    amadeus_client_secret: SecretStr | None
-
-class RateLimitsSettings(BaseSettings):
-    aviasales_rps: float = 1.0
-    kiwi_rps: float = 0.5
-    ryanair_rps: float = 0.3
-
-class AlertDefaultsSettings(BaseSettings):
-    cooldown_hours: int = 6
-    drop_pct: float = 0.25
-    stable_price_band_pct: float = 0.02
-
-class ObservabilitySettings(BaseSettings):
-    sentry_dsn: SecretStr | None
-    log_level: str = "INFO"
-    metrics_port: int = 9090
+```go
+type Config struct {
+    Telegram struct {
+        BotToken       string  `env:"BOT_TOKEN,required"`
+        AllowedUserIDs []int64 `env:"ALLOWED_USER_IDS,required"`
+    }
+    Sources struct {
+        AviasalesToken     string `env:"AVIASALES_TOKEN,required"`
+        KiwiAPIKey         string `env:"KIWI_API_KEY"`
+        AmadeusClientID    string `env:"AMADEUS_CLIENT_ID"`
+        AmadeusClientSecret string `env:"AMADEUS_CLIENT_SECRET"`
+    }
+    RateLimits struct {
+        AviasalesRPS float64 `env:"AVIASALES_RPS" envDefault:"1.0"`
+        KiwiRPS      float64 `env:"KIWI_RPS" envDefault:"0.5"`
+        RyanairRPS   float64 `env:"RYANAIR_RPS" envDefault:"0.3"`
+    }
+    AlertDefaults struct {
+        CooldownHours      int     `env:"COOLDOWN_HOURS" envDefault:"6"`
+        DropPct            float64 `env:"DROP_PCT" envDefault:"0.25"`
+        StablePriceBandPct float64 `env:"STABLE_PRICE_BAND_PCT" envDefault:"0.02"`
+    }
+    Observability struct {
+        SentryDSN   string `env:"SENTRY_DSN"`
+        LogLevel    string `env:"LOG_LEVEL" envDefault:"info"`
+        MetricsPort int    `env:"METRICS_PORT" envDefault:"9090"`
+    }
+    DatabaseURL string `env:"DATABASE_URL,required"`
+    PublicURL   string `env:"PUBLIC_URL,required"` // HTTPS base URL of the Mini App (web_app buttons, deep links)
+}
 ```
 
-**Secrets in prod:** a **`.env` file mounted into the container** or **Docker secrets**. Not committed; `.env.example` lives in the repo as a reference.
+Secrets never appear in logs: the config's `String()`/`LogValue()` redacts token fields.
 
-**Startup validation:** every required field is validated by Pydantic; on failure the bot crashes with a clear message. The alternative — "it will explode somewhere deep later" — is unacceptable for a 24/7 service.
+#### Graceful shutdown
+
+`main` wires everything under a root `context` cancelled on SIGINT/SIGTERM (`signal.NotifyContext`). Shutdown order: stop accepting Telegram updates → let in-flight check cycles finish (with a deadline) → close the pgx pool → flush Sentry. The scheduler's DB-driven design means a killed-mid-cycle check simply reruns on the next tick.
 
 ---
 
@@ -483,20 +527,19 @@ class ObservabilitySettings(BaseSettings):
 
 **Scenario:** the user created a subscription BEG → Barcelona (BCN), dates 10–20 July 2026, departure-airport flexibility enabled (BUD, SOF, TSR, ZAG as alternatives), `combined` strategy (threshold €100 OR −25% off the average).
 
-1. The Scheduler triggers a subscription check (departure ~50 days away → medium-priority, every 4 hours). A `trace_id` is assigned for end-to-end logging of the whole cycle.
+1. The Scheduler tick finds the subscription due (`next_check_at <= now()`; departure ~50 days away → medium tier, every 4 hours). A `trace_id` is generated and attached to the context for end-to-end logging of the whole cycle.
 2. The Subscription Manager hands over the rule → passed to the Multi-Airport Expander.
 3. The Expander unfolds into pairs for each configured alternative: (BEG, BCN), (BUD, BCN), (SOF, BCN), (TSR, BCN), (ZAG, BCN). For each pair + date range, requests are formed.
-4. **Cache Layer** checks each key `(source, origin, destination, date_from, date_to)`. On a hit, the cached Flight list is returned. On a miss, the request continues.
-5. Miss requests are fired in parallel into the Aviasales, Kiwi, Ryanair adapters. Each adapter:
-   - Respects its own rate limit (`aiolimiter`).
-   - Applies retry/backoff (`tenacity`).
-   - Checks the circuit breaker — if the adapter is "tripped", the request is skipped.
+4. **Cache Layer** checks each key `(source, origin, destination, date_from, date_to)`. On a hit, the cached Flight slice is returned. On a miss, the request continues.
+5. Miss requests fan out concurrently (errgroup) into the Aviasales, Kiwi, Ryanair adapters. Each adapter:
+   - Waits on its own rate limiter (`x/time/rate`).
+   - Applies retry/backoff and checks the circuit breaker (`failsafe-go`) — if the adapter is "tripped", the request is skipped.
    - Performs a sanity check on the response.
-   - Returns a normalized Flight list.
+   - Returns a normalized Flight slice.
    - Writes the result back to the Cache Layer.
 6. **Currency Normalizer** adds `price_eur` to each Flight using the current rate from `fx_rates`.
-7. The Aggregator merges results, deduplicates. For alternative airports, transfer cost is added to `price_eur` → `effective_price_eur`.
-8. Every observation is written to the Price History Store (with outlier check).
+7. The Aggregator merges results, deduplicates. For alternative airports, transfer cost is added → `effective_price_eur`.
+8. Every observation is written to the Price History Store (with outlier check; conflicts on the idempotency index are ignored via `ON CONFLICT DO NOTHING`).
 9. The Alert Engine checks the subscription's strategy conditions for every Flight:
    - Price ≤ €100? → checks.
    - Price ≤ 30-day average × 0.75? → fetches the average from history (excluding `outlier=true`), checks.
@@ -504,40 +547,41 @@ class ObservabilitySettings(BaseSettings):
 10. Candidates pass through anti-spam (cooldown, dedup against already sent, stable-price guard).
 11. If the subscription is in `dry_run`, a row is written to `alerts_sent` with the flag, without sending to Telegram.
 12. Otherwise, the Notification Layer formats and sends to Telegram. The `message_id` is stored for possible later edits.
-13. Cycle metrics (latency, Flights found, alerts generated) are updated in Prometheus.
+13. `next_check_at` is advanced (tier interval + jitter); cycle metrics (latency, Flights found, alerts generated) are updated in Prometheus.
 
 ---
 
 ## 5. Data model (DB schema)
 
-Migrations use **Alembic** from the very first revision. SQLite-compatible syntax on MVP — the path to Postgres requires no DDL rewrites.
+Migrations use **`goose`** (plain-SQL migration files, embedded via `go:embed` and applied automatically at startup or via `warden migrate`). Queries are written in SQL and compiled to typed Go by **`sqlc`**.
 
 ```
 subscriptions
   id (uuid pk), user_chat_id (bigint, indexed),
-  origin (str), origin_alternatives (json),
-  destination (json — list of IATA),
-  date_from, date_to, return_date_from, return_date_to,
-  trip_length_min, trip_length_max,
-  max_price, max_stops, max_duration_minutes,
-  airlines_whitelist (json), airlines_blacklist (json),
-  alert_strategy (str), alert_params (json),
-  cooldown_hours, dry_run (bool default false),
-  status (active/paused/archived),
-  created_at, updated_at
+  origin (text), origin_alternatives (jsonb),
+  destination (jsonb — list of IATA),
+  date_from, date_to, return_date_from, return_date_to (date),
+  trip_length_min, trip_length_max (int),
+  max_price (numeric), max_stops (int), max_duration_minutes (int),
+  airlines_whitelist (jsonb), airlines_blacklist (jsonb),
+  alert_strategy (text), alert_params (jsonb),
+  cooldown_hours (int), dry_run (bool default false),
+  status (text: active/paused/archived),
+  next_check_at (timestamptz, indexed),      -- drives the scheduler
+  created_at, updated_at (timestamptz)
 
 price_observations
   id (bigint pk),
-  route_key (str, indexed) — 'BEG-BCN-2026-07-15'
+  route_key (text, indexed) — 'BEG-BCN-2026-07-15'
   subscription_id (uuid fk → subscriptions.id ON DELETE SET NULL),
-  price (float), currency (str),
-  price_eur (float),
-  source (str),
-  flight_signature (str) — 'W6-2643',
+  price (numeric), currency (text),
+  price_eur (numeric),
+  source (text),
+  flight_signature (text) — 'W6-2643',
   departure_at (timestamptz),
   observed_at (timestamptz),
   outlier (bool default false),
-  raw_payload (json)
+  raw_payload (jsonb)
 
   UNIQUE (flight_signature, departure_at, source, hour_bucket)
   INDEX (route_key, observed_at DESC)
@@ -546,9 +590,9 @@ price_observations
 alerts_sent
   id (bigint pk),
   subscription_id (uuid fk → subscriptions.id ON DELETE CASCADE),
-  flight_signature (str),
-  price_eur (float),
-  strategy_triggered (str),
+  flight_signature (text),
+  price_eur (numeric),
+  strategy_triggered (text),
   sent_at (timestamptz),
   message_id (bigint),
   dry_run (bool default false)
@@ -557,18 +601,18 @@ alerts_sent
 
 api_call_log
   id (bigint pk),
-  source (str), endpoint (str),
+  source (text), endpoint (text),
   status_code (int), duration_ms (int),
   rate_limit_remaining (int nullable),
-  error (str nullable),
+  error (text nullable),
   called_at (timestamptz)
 
   INDEX (source, called_at DESC)
 
 fx_rates
   date (date pk part),
-  currency (str pk part) — 'USD', 'GBP', ...
-  rate_to_eur (float),
+  currency (text pk part) — 'USD', 'GBP', ...
+  rate_to_eur (numeric),
   fetched_at (timestamptz)
 
   PRIMARY KEY (date, currency)
@@ -576,32 +620,35 @@ fx_rates
 scheduler_runs                 -- for /health and metrics
   id (bigint pk),
   subscription_id (uuid fk),
-  started_at, finished_at,
+  started_at, finished_at (timestamptz),
   trace_id (uuid),
   flights_found (int),
   alerts_generated (int),
-  status (success/partial/failed),
-  error (str nullable)
+  status (text: success/partial/failed),
+  error (text nullable)
 ```
 
 **Foreign keys:** `subscription_id` in `price_observations` — `ON DELETE SET NULL` (history outlives subscription deletion); in `alerts_sent` — `ON DELETE CASCADE` (alerts are meaningless without a subscription).
 
-**JSON fields** on SQLite work via the `JSON1` extension; on Postgres — native `jsonb`. SQLAlchemy 2.x abstracts the difference.
+**Money as `numeric`**, scanned into Go as `pgtype.Numeric` / converted to a minor-units `int64` in the domain — never `float64` arithmetic on money in comparisons that gate alerts.
 
 ---
 
 ## 6. Implementation roadmap (MVP → Full)
 
+See **[PLAN.md](PLAN.md)** for the detailed phase-by-phase development plan. Summary:
+
 ### MVP (1–2 weeks)
 
-Goal: a working bot for a single route, one source, manual alerts. **Already with the baseline infrastructure** so it doesn't need to be redone later.
+Goal: a working bot for a single route, one source, real alerts. **Already with the baseline infrastructure** so it doesn't need to be redone later.
 
 **Functionality:**
 
-- Telegram Bot Layer (aiogram 3.x): commands `/new`, `/list`, `/delete`, user whitelist.
-- Subscription Manager on SQLite, without alternative airports.
+- Bot: `/start` with "Open App" button, whitelist, plain-text alert delivery.
+- Mini App: subscriptions list + create/delete form (airport autocomplete, date range); HTTP API with initData auth.
+- Subscription Manager on Postgres (sqlc), without alternative airports.
 - One adapter: **Aviasales / Travelpayouts**.
-- Scheduler (APScheduler async): one shared cron, hourly check.
+- Scheduler: DB-driven ticker loop, single tier (hourly).
 - Currency Normalizer with ECB rates.
 - Price History Store: write + simple "minimum over N days" query.
 - Alert Engine: `absolute_threshold` and `historical_minimum`, cooldown.
@@ -609,39 +656,35 @@ Goal: a working bot for a single route, one source, manual alerts. **Already wit
 
 **Infrastructure (from day one):**
 
-- Alembic migrations.
-- pydantic-settings for config.
-- structlog + Sentry.
-- Docker + docker-compose.
-- `pytest` with baseline adapter tests (fixtures via `respx`).
-- GitHub Actions: lint (ruff) + types (mypy) + tests.
+- goose migrations, sqlc codegen.
+- Typed env config with startup validation.
+- slog JSON + Sentry.
+- Docker + docker-compose (app + Postgres).
+- Table-driven tests with `testify`; adapter tests against `httptest.Server` fixtures.
+- GitHub Actions: `golangci-lint` + `go vet` + tests + build.
 
 ### v1.0 (next 1–2 weeks)
 
-- Adding the Kiwi adapter and Ryanair adapter.
+- Kiwi and Ryanair adapters.
 - Aggregator with deduplication and sanity check.
 - Cache Layer (in-memory).
 - Multi-Airport Expander with the transfer reference table.
 - Circuit breaker for adapters.
 - Alert Engine: `relative_drop`, `combined`, full anti-spam (cooldown + dedup + stable-price).
-- Inline buttons in notifications.
-- `/stats` command with subscription statistics.
-- `/health` command with adapter aliveness.
-- Prometheus metrics on `/metrics`.
-- Dry-run mode for subscriptions.
-- SQLite backup to a separate volume once a day.
+- Inline buttons in notifications (Buy / open-in-app deep link / Mute).
+- Mini App: edit/pause/resume, stats screen with price chart, health panel, settings; Prometheus `/metrics`.
+- Priority tiers in the scheduler; dry-run mode; daily retention job.
+- Postgres backup (pg_dump cron) to a separate volume.
 
 ### v1.1+ (as needed)
 
-- Migrating SQLite → PostgreSQL (optionally TimescaleDB for price_observations).
-- Redis for the Cache Layer (instead of in-memory).
-- Amadeus adapter / Duffel adapter as a backup.
-- Price history charts — matplotlib → PNG → `send_photo` to Telegram (via `/stats`).
-- Trend Analyzer — a weekly digest across subscriptions.
-- Calendar Heatmap as an image.
+- TimescaleDB for `price_observations`.
+- Redis for the Cache Layer (only if a second process appears).
+- Amadeus / Duffel adapter as a backup.
+- Trend Analyzer — a weekly digest across subscriptions (bot message + Mini App screen).
 - Smart suggestions ("where to fly cheaply from BG this weekend").
-- Round-trip support with two independent tickets on different airlines (Kiwi-style virtual interlining) — requires reworking the Flight model into an Itinerary.
-- Wizz Air monitoring via a headless browser (Playwright in a separate container).
+- Round-trip support with two independent tickets on different airlines — requires reworking the Flight model into an Itinerary.
+- Wizz Air monitoring via a headless browser (chromedp / Playwright container).
 
 ---
 
@@ -650,36 +693,43 @@ Goal: a working bot for a single route, one source, manual alerts. **Already wit
 | Risk | Mitigation |
 |------|------------|
 | Ryanair adapter ban / block (unofficial API) | Graceful fallback, circuit breaker, do not crash the cycle. Availability monitoring via `/health`. |
-| Free API limits exhausted | Cache Layer (15–60 min), scheduler jittering, prioritization by departure proximity, per-source `aiolimiter`. The `warden_adapter_quota_remaining` metric. |
-| API response schema changes | Pydantic validation at the adapter output, contract tests with fixtures (`respx` + recorded responses), `raw_payload` logged in the DB. Sentry alert on a spike in parsing errors. |
-| DB bloat | Retention policy with downsampling and deletion of old observations (see Price History Store). The `warden_db_size_bytes` metric. |
+| Free API limits exhausted | Cache Layer (15–60 min), scheduler jittering, prioritization by departure proximity, per-source rate limiter. The `warden_adapter_quota_remaining` metric. |
+| API response schema changes | Strict typed decoding at the adapter output, contract tests with recorded fixtures (`httptest`), `raw_payload` logged in the DB. Sentry alert on a spike in parsing errors. |
+| DB bloat | Retention policy with downsampling and deletion of old observations. The `warden_db_size_bytes` metric. |
 | Notification spam | Cooldown, dedup, stable-price guard (±2%). "Mute alert" button. |
 | False triggers (broken €1 price, price in cents) | Two-layer sanity check: inside the adapter (absolute thresholds) + outlier flag in the DB (relative to the route median). Outliers excluded from aggregates. |
-| Time zones | UTC in the DB, TZ-aware datetimes via `zoneinfo`. Airport resolution via `airportsdata` offline. Prices in EUR after normalization. Covered with `freezegun` tests. |
-| **FX rate swings / ECB unreachable** | Rate cache in the DB, fallback to last known, `stale_rate=true` log. Sentry alert if rates aren't refreshed for > 3 days. |
-| **External API deprecation (Kiwi Tequila move)** | Isolation via the `BaseAdapter` interface. Replacement plan — Duffel/FlightAPI/SerpAPI. Contract tests catch breaking changes. |
-| **Event loop stalls on a sync operation** | All I/O is async, CPU-heavy parsing offloaded via `asyncio.to_thread`. The cycle-latency metric helps spot degradation. |
-| **Data loss on restart** | SQLAlchemyJobStore for APScheduler (jobs survive restart). Daily DB backup. Idempotent writes in `price_observations`. |
-| **Whitelist bypass or token leak** | All secrets via env / Docker secrets, never in git. ALLOWED_USER_IDS as the first line. Logging of dropped updates for auditing. |
+| Time zones | UTC in the DB (`timestamptz`), TZ-aware `time.Time` via embedded airport dataset + `time/tzdata`. Prices in EUR after normalization. Covered with fake-clock tests. |
+| FX rate swings / ECB unreachable | Rate cache in the DB, fallback to last known, `stale_rate=true` log. Sentry alert if rates aren't refreshed for > 3 days. |
+| External API deprecation (Kiwi Tequila move) | Isolation via the `Adapter` interface. Replacement plan — Duffel/FlightAPI/SerpAPI. Contract tests catch breaking changes. |
+| Goroutine leaks / stuck cycles | Every external call bounded by `context` deadlines; per-cycle timeout; `warden_cycle_duration_seconds` metric; `goleak` in tests. |
+| Data loss on restart | Scheduler state lives in Postgres (`next_check_at`) — nothing to lose. Daily pg_dump. Idempotent writes in `price_observations`. |
+| Whitelist bypass or token leak | All secrets via env / Docker secrets, never in git. ALLOWED_USER_IDS enforced in both bot and API middleware. Logging of dropped updates/requests for auditing. Config redacts secrets in logs. |
+| Forged / replayed Mini App requests | initData HMAC validation on every request (bot-token key, constant-time compare), `auth_date` freshness ≤ 24 h, identity only from validated initData, ownership checks per mutation. |
 
 ---
 
 ## 8. Open questions
 
-**Resolved in v0.2:**
+**Resolved in 0.6 (Mini App):**
 
-- ~~Where to deploy?~~ → Hetzner Cloud (~€4–5/month). Free-tier Railway/Fly.io is unreliable for 24/7.
-- ~~Webhook or long-polling?~~ → Long-polling for MVP.
-- ~~SQLite or Postgres from the start?~~ → SQLite on MVP, the path to Postgres is clear (Alembic, SQLAlchemy 2.x async, `aiosqlite` → `asyncpg` by driver swap).
+- ~~Bot dialogs vs web UI?~~ → Telegram Mini App (React) is the only management UI; the bot keeps `/start`, `/help`, and alert delivery. The inline-keyboard FSM (`/new` pickers, datepicker) is dropped entirely.
+- ~~Where to host the frontend?~~ → Embedded into the Go binary (`go:embed`); one artifact, no CORS. TLS via a Caddy sidecar.
+- ~~Who actually needs price history charts~~ (open since 0.2) → charts render in the Mini App (`recharts`), no PNG generation needed.
+
+**Resolved in the Go rewrite (0.5):**
+
+- ~~SQLite or Postgres from the start?~~ → Postgres from day one (Docker Compose makes it free operationally; sqlc+pgx work best against real Postgres; removes a future migration project).
+- ~~Job-queue library for the scheduler?~~ → None; DB-driven `next_check_at` + ticker.
+- ~~Where to deploy?~~ → Hetzner Cloud (~€4–5/month), carried over from v0.2.
+- ~~Webhook or long-polling?~~ → Long-polling, carried over.
 
 **Still open:**
 
+- **Domain for the Mini App HTTPS URL.** Options: buy a cheap domain (cleanest, ~€10/yr, Caddy + Let's Encrypt), a free host-based hack (`<ip>.sslip.io` + Let's Encrypt), or a permanent cloudflared tunnel. Architecture is unaffected; decide before the first deploy. Local dev uses a cloudflared/ngrok tunnel either way.
 - **Kiwi Tequila status in 2026.** Needs verification: is the free tier still around, are new keys being issued? Plan B — Duffel (has a test mode).
 - **Round-trip with virtual interlining.** Requires reworking `Flight` → `Itinerary` (a list of Flights treated as one ticket). Deferred to v1.1+; for now round-trip is treated as a pair of independent one-ways.
-- **Ground transport.** A static lookup vs the Omio API. Reassess after v1.0: if the static lookup is often wrong (user complaints), migrate.
-- **Wizz Discount Club.** A headless Playwright in a separate container (runs once a day) is a workable option but requires maintenance. The alternative — email forwarding via IMAP — is fragile to template changes. Decide in v1.1+.
-- **Who actually needs price history charts.** If only the owner — `matplotlib` → PNG is enough. If a wider circle is planned — a small FastAPI + Chart.js web frontend. Decide based on real usage.
-- **Telegram premium features.** The bot can send interactive charts via WebApp. Useful for close subscription analysis, but requires an HTTPS endpoint — raises the entry barrier. Deferred.
+- **Ground transport.** A static lookup vs the Omio API. Reassess after v1.0.
+- **Wizz Discount Club.** Headless browser (chromedp) in a separate container vs IMAP email forwarding. Decide in v1.1+.
 
 ---
 
@@ -689,91 +739,111 @@ Every choice comes with rationale. Alternatives are listed where they were actua
 
 ### Language and runtime
 
-- **Python 3.12+** — `ryanair-py` uses modern typing, and Pydantic v2 / SQLAlchemy 2.x run more efficiently on 3.12.
-- Asyncio as the primary concurrency model. Threads — only for CPU-heavy parsing via `asyncio.to_thread`.
+- **Go 1.24+** — single static binary, tiny deploy artifact, goroutine concurrency maps naturally onto "N subscriptions × M adapters" fan-out, first-class `context` cancellation.
+- Concurrency primitives: `errgroup` for fan-out, `x/sync/semaphore` for bounding, channels only where they genuinely help.
+
+### Frontend (Mini App)
+
+- **React 19 + TypeScript + Vite** — the standard Mini App stack; most examples and templates target it.
+- **`@telegram-apps/sdk-react`** — typed Mini App platform bindings (initData, theme, BackButton/MainButton, haptics).
+- **`@telegram-apps/telegram-ui`** — Telegram-native components; automatic theming.
+- **TanStack Query** — server-state management; **`recharts`** — price history charts.
+- Build output embedded via `go:embed`; hashed asset filenames make caching trivial.
+- Alternatives: Svelte (lighter, poorer Telegram-widget ecosystem), Go templates + HTMX (no build step, but hand-rolled SDK integration) — rejected.
+
+### HTTP API
+
+- **`net/http`** with Go 1.22+ pattern routing (`GET /api/v1/subscriptions/{id}`) — no router dependency.
+- **`telegram-mini-apps/init-data-golang`** — initData HMAC validation + parsing (the documented Telegram scheme; small, focused library).
 
 ### Telegram bot
 
-- **`aiogram` 3.x** — async-first, FSM out of the box (needed for the step-by-step `/new`), Pydantic update validation, active development.
-- The `python-telegram-bot` alternative — rejected: heavier, more "classical" API.
-- **`aiogram3-calendar`** — inline-keyboard calendar widget for the `/new` date-range steps (avoids manual `YYYY-MM-DD` typing). See §3.2 "Input UX for the `/new` dialog".
-- **`airportsdata`** — also drives the airport-picker dropdown (offline IATA / city search), in addition to its TZ-resolution role.
+- **`github.com/go-telegram/bot`** — zero-dependency, actively maintained, full Bot API coverage, middleware, prefix-routed callback handlers. Used for `/start`, `/help`, alert delivery with inline buttons.
+- Alternatives: `tucnak/telebot` (popular but development slowed), `mymmrac/telego`.
+- No FSM, no dialog widgets — that role moved to the Mini App.
 
 ### HTTP clients and resilience
 
-- **`httpx.AsyncClient`** — the async HTTP standard. Supports HTTP/2, connection pool, convenient injection in tests via `respx`.
-- **`tenacity`** — retry with exponential backoff and jitter. Decorator-based, reads better than custom loops.
-- **`aiolimiter`** — token bucket for per-source rate limiting.
-- **`pybreaker`** — circuit breaker. The alternative — a custom counter in Redis/DB, but `pybreaker` is ready-made.
+- **`net/http`** with a tuned shared `Transport` — the stdlib client is the async HTTP standard in Go; no wrapper library.
+- **`github.com/failsafe-go/failsafe-go`** — retry with exponential backoff + jitter, and circuit breaker, composed as policies. One library for both concerns.
+- **`golang.org/x/time/rate`** — token bucket for per-source rate limiting.
 
 ### Scheduler
 
-- **`APScheduler` 3.x (AsyncIOScheduler)** — sufficient for a single instance, survives restart via `SQLAlchemyJobStore`.
-- The `arq` alternative — rejected for MVP (pulls in Redis). Reconsidered if Redis is needed anyway for caching.
+- **Hand-rolled DB-driven loop** — `time.Ticker` + `next_check_at` column. Persistence and restart-safety come from Postgres; no job-queue dependency.
+- Alternatives: `gocron`, `robfig/cron` — rejected: in-memory job state duplicates what the DB already holds.
 
-### Database and ORM
+### Database
 
-- **SQLAlchemy 2.x in async mode** — modern API (`AsyncSession`, `select()`-style), well typed.
-- **`aiosqlite`** (MVP) → **`asyncpg`** (Postgres). The driver changes in the connection string without code changes.
-- **Alembic** — migrations from day one, otherwise the SQLite → Postgres move is painful.
-- **Pydantic v2** — for normalized domain models (`Flight`, `Segment`, `AlertParams`).
-- Alternatives: SQLModel (Pydantic+SQLAlchemy, simpler) — fine if a single source of schema is preferred. Tortoise ORM — rejected: less mature, weaker migration story.
+- **PostgreSQL 16** + **`jackc/pgx/v5`** (with `pgxpool`) — the canonical Go Postgres driver.
+- **`sqlc`** — SQL-first: queries live in `.sql` files, compile to typed Go. No ORM magic, reviewable SQL, and the Alert Engine aggregates are plain SQL anyway.
+- **`goose`** — plain-SQL migrations, embeddable, applied at startup or via CLI subcommand.
+- Alternatives: GORM — rejected (reflection-heavy, hides SQL); `sqlx` — fine but sqlc gives compile-time checked queries; `golang-migrate` — fine too, goose chosen for embedded-migrations ergonomics.
 
 ### Cache
 
-- **MVP:** `aiocache` (in-memory backend) — no external dependencies.
-- **v1.1+:** Redis (`redis.asyncio`) if multiple processes appear or the cache needs to be shared with the replay CLI.
+- **MVP:** in-memory TTL cache (`patrickmn/go-cache` or ~80 hand-rolled lines).
+- **Later:** Redis (`redis/go-redis`) only if a second process needs the cache.
 
 ### Config
 
-- **`pydantic-settings`** — typed config with startup validation. `.env` locally, env vars / Docker secrets in prod.
+- **`caarlos0/env`** + **`joho/godotenv`** — typed struct from env vars, `.env` locally, validated at startup.
+- Alternatives: `koanf`/`viper` — overkill for a flat env-only config.
 
 ### Logging, metrics, errors
 
-- **`structlog`** — structured JSON logs.
-- **`prometheus-client`** — pull metrics on a separate port.
-- **`sentry-sdk`** — error tracking, free tier.
+- **`log/slog`** (stdlib) — structured JSON logs, `trace_id` via context.
+- **`prometheus/client_golang`** — pull metrics on a separate port.
+- **`getsentry/sentry-go`** — error tracking, free tier.
 
-### Time and FX
+### Time, TZ, and airports
 
-- **`zoneinfo`** (stdlib) for timezone operations.
-- **`airportsdata`** — offline TZ resolution by IATA.
-- **ECB daily reference rates** — FX rate source, cached in the DB.
+- **`time` + `time/tzdata`** (stdlib) — the binary carries its own zone database.
+- **Embedded OurAirports dataset** (`go:embed` CSV, parsed once at startup) — offline IATA lookup, city search for the airport picker, and TZ resolution. Replaces Python's `airportsdata`.
+
+### Money
+
+- Prices stored as `numeric` in Postgres; in Go — integer minor units (`int64` cents) for comparisons, `float64` only at display edges.
 
 ### Testing
 
-- **`pytest` + `pytest-asyncio`** — the foundation.
-- **`respx`** — mocking httpx requests, fixtures with recorded adapter responses.
-- **`freezegun`** — frozen time in Alert Engine tests.
-- **`coverage.py`** — 80% target for domain logic (adapters, aggregator, alert engine); for I/O wrappers — best effort.
+- **`testify`** (assert/require) + table-driven tests — the foundation.
+- **`net/http/httptest`** — adapter contract tests against recorded fixture responses in `testdata/{source}/`.
+- **`jonboulle/clockwork`** — injectable fake clock for Alert Engine / scheduler tests (replaces `freezegun`).
+- **`testcontainers-go`** — real Postgres in integration tests (replaces "temp SQLite file"); `go test -short` skips them.
+- **`uber-go/goleak`** — goroutine-leak detection in tests.
+- Coverage target: 80% for domain logic (adapters, aggregator, alert engine); I/O wrappers — best effort.
 
-### Lint and types
+### Lint and static analysis
 
-- **`ruff`** — linter + formatter (replaces flake8/black/isort).
-- **`mypy --strict`** for domain code. Looser for adapters because of external data.
+- **`golangci-lint`** — govet, staticcheck, errcheck, revive, gofumpt, and friends in one runner.
+- **`go vet`** in CI as a baseline.
 
 ### Containerization and deployment
 
-- **Docker + docker-compose** from MVP.
-- Base image — `python:3.12-slim`.
-- Deployment — **Hetzner Cloud** (~€4–5/month). Docker Compose, `restart: always`. A simple watchtower for auto-updates from the registry (optional).
-- CI/CD — **GitHub Actions**: lint → tests → docker build → push to GHCR → ssh-deploy (via `appleboy/ssh-action` or watchtower).
+- **Docker multi-stage build**: `node:22` (Vite build) → `golang:1.24` (embeds `web/dist`) → `gcr.io/distroless/static` runtime. Image ≈ 20 MB.
+- **docker-compose**: app + `postgres:16-alpine` + **Caddy** (TLS termination, automatic Let's Encrypt for the Mini App HTTPS URL), `restart: always`.
+- Deployment — **Hetzner Cloud** (~€4–5/month).
+- CI/CD — **GitHub Actions**: lint → tests → docker build → push to GHCR → ssh-deploy (or watchtower).
 
 ### Summary table
 
 | Layer | MVP | v1.1+ |
 |-------|-----|-------|
-| Bot framework | aiogram 3.x | aiogram 3.x |
-| HTTP | httpx + tenacity + aiolimiter | + pybreaker |
-| Scheduler | APScheduler async | APScheduler / arq |
-| DB | SQLite + aiosqlite | PostgreSQL + asyncpg (opt. TimescaleDB) |
-| ORM | SQLAlchemy 2.x async + Alembic | same |
-| Cache | aiocache (in-memory) | Redis |
-| Config | pydantic-settings | same |
-| Logs | structlog (JSON) | structlog + Grafana Loki |
-| Metrics | prometheus-client | + Grafana Cloud |
-| Errors | Sentry | Sentry |
-| Tests | pytest + respx + freezegun | + integration against real APIs in nightly |
+| Frontend | React + TS + Vite, @telegram-apps/sdk-react, telegram-ui | same |
+| API | net/http + init-data-golang | same |
+| Bot framework | go-telegram/bot | same |
+| HTTP (outbound) | net/http + failsafe-go + x/time/rate | same |
+| Scheduler | DB-driven ticker loop | same |
+| DB | PostgreSQL 16 + pgx v5 | + TimescaleDB (opt.) |
+| Queries / migrations | sqlc + goose | same |
+| Cache | in-memory TTL | Redis (opt.) |
+| Config | caarlos0/env + godotenv | same |
+| Logs | slog (JSON) | + Grafana Loki |
+| Metrics | client_golang | + Grafana Cloud |
+| Errors | sentry-go | same |
+| Tests | testify + httptest + clockwork + testcontainers | + nightly integration vs real APIs |
+| TLS / ingress | Caddy sidecar (Let's Encrypt) | same |
 | Deploy | Docker Compose / Hetzner | same |
 
 ---
@@ -798,85 +868,101 @@ Every choice comes with rationale. Alternatives are listed where they were actua
 
 **Levels:**
 
-1. **Unit** — pure functions: Alert Engine strategies, Currency Normalizer, Aggregator dedup. Fast (< 1 s per suite), no I/O. `freezegun` for time-sensitive tests.
-2. **Adapter contract tests** — fixtures with recorded real API responses in `tests/fixtures/{source}/`. `respx` swaps them in for httpx. Test: "parse response → expected Flight list". Breaks when the external API changes its schema.
-3. **Integration tests** — against real APIs, but only in a **nightly CI job** (not per PR) to avoid burning quotas. Marked `@pytest.mark.integration`.
-4. **End-to-end** — a mini scenario: create a subscription via an aiogram test client → run one cycle → assert that an observation (and optionally an alert) appeared in the DB. Uses a **temporary SQLite DB**.
+1. **Unit** — pure functions: Alert Engine strategies, Currency Normalizer, Aggregator dedup. Fast (< 1 s per suite), no I/O, table-driven. `clockwork` for time-sensitive tests.
+2. **Adapter contract tests** — fixtures with recorded real API responses in `testdata/{source}/`. An `httptest.Server` replays them. Test: "parse response → expected Flight slice". Breaks when the external API changes its schema.
+3. **API handler tests** — `httptest` against the real mux: signed initData fixtures (valid / expired / tampered / non-whitelisted), CRUD flows, ownership checks. The initData signer is a test helper (HMAC with a test bot token).
+4. **Integration tests** — Postgres via `testcontainers-go` for the storage layer; real external APIs only in a **nightly CI job** (build tag `integration`), not per PR, to avoid burning quotas.
+5. **End-to-end** — a mini scenario: create a subscription through `POST /api/v1/subscriptions` → run one scheduler cycle → assert that an observation (and optionally an alert sent to the fake Telegram server) appeared.
+6. **Frontend** — `vitest` + Testing Library for form logic (validation, date-range constraints); no browser-automation suite for MVP — the API contract tests carry the weight.
 
 **Doubles:**
 
-- Telegram API — `aiogram.test` (fake bot).
-- DB — per-test file or in-memory SQLite.
-- Time — `freezegun`.
-- HTTP — `respx`.
+- Telegram Bot API — `httptest.Server` impersonating `api.telegram.org` (go-telegram/bot accepts a custom server URL).
+- Mini App auth — helper-signed initData strings; no Telegram involved.
+- DB — testcontainers Postgres, one container per package, per-test schema.
+- Time — `clockwork.FakeClock` injected where scheduling/cooldowns are computed.
+- HTTP — `httptest.Server` per adapter.
 
 ### 10.3. CI/CD
 
 **On every PR:**
 
-- `ruff check` + `ruff format --check`
-- `mypy src/`
-- `pytest -m "not integration"` + coverage > 75%
-- Docker image build (without push)
+- `golangci-lint run`
+- `go vet ./...`
+- `go test -short ./...` + coverage > 75%
+- `npm run lint` (eslint + tsc) + `npm run test` (vitest) + `npm run build` in `web/`
+- `go build ./...` (with the built `web/dist` embedded) + Docker image build (without push)
+- `sqlc diff` / `sqlc vet` — generated code in sync with queries
 
-**On merge to `main`:**
+**On merge to `master`:**
 
-- The full pipeline above
-- Push the Docker image to GHCR with tags `main` and `sha-XXX`
+- The full pipeline above (including testcontainers integration tests)
+- Push the Docker image to GHCR with tags `latest` and `sha-XXX`
 - SSH deploy to the VPS: `docker compose pull && docker compose up -d`
 - Smoke test: HTTP `/health` returns 200 within 30 s after restart.
 
 **Nightly:**
 
-- `pytest -m integration` against real APIs.
+- `go test -tags integration ./...` against real APIs.
 - FX-rate freshness check.
-- SQLite backup to S3 / a separate volume.
+- pg_dump backup to S3 / a separate volume.
 
 ### 10.4. Security
 
-- **User whitelist** via aiogram middleware.
-- **Secrets** — only via env / Docker secrets, never in git. `.env.example` without values.
-- **`.gitignore`** covers `.env`, `*.sqlite`, `*.db`, local caches.
-- **Telegram bot token** is rotated via @BotFather if compromised.
-- **Input validation** — Pydantic schemas for every bot command (IATA codes by regex, dates via `date.fromisoformat`).
-- **SQL injection** — no raw SQL in business logic, everything goes through SQLAlchemy ORM/Core.
-- **Dependency audit** — `pip-audit` in CI, alert on CVEs.
-- **Backup** — once-a-day SQLite copy to S3 (Hetzner Storage Box ~€3/month for 1 TB).
+- **Mini App auth** — initData HMAC validation on **every** API request (constant-time compare, `auth_date` ≤ 24 h); the API trusts nothing from the client body about identity — `user_chat_id` always comes from validated initData.
+- **User whitelist** — enforced twice: bot middleware (updates) and API middleware (requests). Object ownership checked per mutation.
+- **Secrets** — only via env / Docker secrets, never in git. `.env.example` without values. Config redacts secrets in `String()`/`LogValue()`. The bot token doubles as the initData signing key — one more reason it never leaves env.
+- **`.gitignore`** covers `.env`, local dumps, build artifacts, `node_modules`.
+- **Telegram bot token** is rotated via @BotFather if compromised (this also invalidates outstanding initData).
+- **Input validation** — server-side in the domain layer regardless of the Mini App's client-side checks: IATA codes must exist in the airports dataset, dates via `time.Parse`, ranges/enums validated before persisting. The Mini App is a convenience, not a trust boundary.
+- **Standard web headers** on the SPA: CSP (self + Telegram SDK requirements), no third-party origins.
+- **SQL injection** — impossible by construction: all queries are sqlc-generated with bound parameters; no string-built SQL.
+- **Dependency audit** — `govulncheck` in CI, Dependabot for go.mod.
+- **Backup** — once-a-day pg_dump to S3 (Hetzner Storage Box ~€3/month for 1 TB).
 
 ### 10.5. Repository layout
 
 ```
-warden/
-  src/warden/
-    bot/              — aiogram handlers, FSM dialogs
-    domain/           — Subscription, Flight, AlertStrategy (Pydantic)
-    adapters/         — Aviasales, Kiwi, Ryanair, ...
-      base.py         — BaseAdapter ABC
-    services/         — Aggregator, AlertEngine, CurrencyNormalizer
-    infrastructure/   — DB (SQLAlchemy), cache, scheduler, telemetry
-    config.py         — pydantic-settings
-    main.py
-  tests/
-    unit/
-    contract/
-      fixtures/{source}/
-    integration/
-    e2e/
-  alembic/
-    versions/
+air-tickets-warden/
+  cmd/warden/
+    main.go             — entrypoint, subcommands: run (default), migrate, replay
+  internal/
+    bot/                — /start, /help, alert delivery, callback handlers, middlewares
+    api/                — HTTP handlers /api/v1, initData auth middleware
+    domain/             — Subscription, Flight, Segment, alert strategies (pure Go, no I/O)
+    adapters/           — aviasales/, kiwi/, ryanair/ + shared resilient HTTP client
+    services/           — aggregator, alert engine, currency normalizer, expander,
+                          subscription manager, airports (embedded dataset)
+    scheduler/          — DB-driven ticker loop
+    storage/            — pgx pool, sqlc-generated code, goose runner
+    cache/              — in-memory TTL cache
+    telemetry/          — slog setup, prometheus registry, sentry init
+    config/             — env config struct + validation
+    web/                — HTTP server wiring: SPA static (go:embed), /health, /metrics
+  web/
+    src/                — React app (screens, components, api client)
+    dist/               — Vite build output (embedded; gitignored)
+    package.json, vite.config.ts, tsconfig.json
+  db/
+    migrations/         — goose SQL files (embedded)
+    queries/            — sqlc query files
+  sqlc.yaml
   docker/
-    Dockerfile
-    docker-compose.yml
+    Dockerfile          — node build → go build → distroless
+    docker-compose.yml  — app + postgres + caddy
+    Caddyfile
   .github/workflows/
     ci.yml
     deploy.yml
     nightly.yml
-  pyproject.toml
+  go.mod
+  Makefile
   .env.example
   README.md
+  PLAN.md
 ```
 
-A hexagonal layout (`domain` knows nothing about the DB or httpx; `adapters` / `infrastructure` carry the implementation details).
+The dependency rule mirrors the old hexagonal intent: `internal/domain` imports nothing from the outer packages; `adapters`/`storage`/`bot` depend inward. Everything under `internal/` — nothing is importable from outside the module.
 
 ---
 
@@ -897,9 +983,11 @@ A hexagonal layout (`domain` knows nothing about the DB or httpx; `adapters` / `
 
 ## 12. Changelog
 
-- **0.4 — 2026-05-24.** Added "Input UX for the `/new` dialog" (§3.2 Telegram Bot Layer): searchable airport-picker dropdown via inline keyboards over the offline `airportsdata` dataset, and an inline-keyboard calendar (`aiogram3-calendar`) for date-range selection — replacing manual IATA / `YYYY-MM-DD` typing. Stack updated accordingly (§9 Telegram bot).
+- **0.6 — 2026-07-21.** **Telegram Mini App becomes the management UI.** New components: Mini App Frontend (React 19 + TS + Vite, `@telegram-apps/sdk-react`, `telegram-ui`, TanStack Query, recharts; embedded via `go:embed`) and HTTP API Layer (`/api/v1`, `net/http` pattern routing, initData HMAC auth via `init-data-golang`, whitelist middleware). The bot is reduced to entry point (`/start` + web_app button) and notification delivery with inline buttons; the inline-keyboard FSM, `/new` dialog, pickers, and management commands (`/new`, `/list`, `/pause`, `/search`, `/stats`) are removed — replaced by Mini App screens and API endpoints. `go-telegram/ui` dropped from the stack. Docker gains a node build stage and a Caddy TLS sidecar; the compose ingress serves the Mini App over HTTPS. New open question: domain for the HTTPS URL. Charts open question closed (recharts in-app).
+- **0.5 — 2026-07-21.** **Full rewrite of the design for Go.** Stack replaced: aiogram → `go-telegram/bot` + `go-telegram/ui`; SQLAlchemy/Alembic/aiosqlite → PostgreSQL from day one with `pgx` + `sqlc` + `goose` (SQLite stage dropped); APScheduler → hand-rolled DB-driven ticker scheduler (`next_check_at` column); httpx/tenacity/aiolimiter/pybreaker → `net/http` + `failsafe-go` + `x/time/rate`; pydantic-settings → `caarlos0/env`; structlog → `log/slog`; airportsdata → embedded OurAirports dataset; pytest/respx/freezegun → testify/httptest/clockwork/testcontainers. Repository relaid out as `cmd/` + `internal/`. Money moved to `numeric`/minor units. Development plan extracted to PLAN.md. Python implementation removed (available in git history up to commit `bbe5ceb`).
+- **0.4 — 2026-05-24.** Added "Input UX for the `/new` dialog": airport-picker dropdown and inline calendar.
 - **0.3 — 2026-05-23.** Translated the document from Russian to English. No content changes.
-- **0.2 — 2026-05-23.** Clarified the stack (aiogram 3.x, SQLAlchemy 2.x async, Alembic, pydantic-settings, structlog, Sentry, Prometheus). Added components: Cache Layer, Currency Normalizer, Observability. Specified: idempotent UNIQUE on `price_observations`, outlier detection, dry-run for subscriptions, TZ handling via `zoneinfo` + `airportsdata`. Added sections: §9 Stack, §10 Operations (observability/tests/CI/CD/security/repo layout), §11 Rate limits. Risks expanded (FX, Kiwi deprecation). Open questions on deployment (Hetzner) and webhook vs polling (polling) closed.
+- **0.2 — 2026-05-23.** Clarified the Python stack; added Cache Layer, Currency Normalizer, Observability; ops sections.
 - **0.1 — 2026-05-21.** Initial draft: architecture, DB schema, MVP plan, risks, open questions.
 
 ---
@@ -914,12 +1002,13 @@ A hexagonal layout (`domain` knows nothing about the DB or httpx; `adapters` / `
 - **Multi-city** — several segments in different directions.
 - **Virtual interlining** — stitching together flights on airlines that are not formally interlined. A Kiwi feature.
 - **Metasearch** — an aggregator that does not sell tickets itself but redirects to the source (Aviasales, Skyscanner).
-- **FSM** — Finite State Machine. In aiogram — the mechanism for step-by-step dialogs (creating a subscription across several questions).
+- **Mini App** — a web application opened inside Telegram (WebView) over HTTPS; Telegram supplies signed user identity (`initData`) and native chrome (theme, BackButton, MainButton).
+- **initData** — the query-string payload Telegram injects into a Mini App: user info + `auth_date` + an HMAC-SHA256 signature keyed by the bot token. Validated server-side on every API request.
 - **FX** — foreign exchange. In the bot's context — currency rates for normalizing prices to EUR.
 - **Circuit breaker** — a resilience pattern: after N consecutive failures of an external service, it automatically "opens the circuit" for a cooldown period, sparing requests.
 - **Token bucket** — a rate-limiting algorithm: tokens refill at a set rate, each request consumes one.
-- **Idempotency** — the property of an operation where repeating it doesn't change the result. Implemented via UNIQUE indexes in the DB.
+- **Idempotency** — the property of an operation where repeating it doesn't change the result. Implemented via UNIQUE indexes + `ON CONFLICT DO NOTHING`.
 - **Outlier** — a statistical anomaly. In context — a suspicious price that does not participate in history aggregates.
 - **Downsampling** — reducing the sampling frequency of a time series (e.g., hourly → daily) to save storage.
 - **Dry-run** — a mode in which an operation runs but has no side effects. For subscriptions — an alert is written to the DB but not sent.
-- **TZ-aware datetime** — a point in time with an explicit timezone, as opposed to a "naive" datetime.
+- **errgroup** — `golang.org/x/sync/errgroup`; structured concurrent fan-out with shared context cancellation.
