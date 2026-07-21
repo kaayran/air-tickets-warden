@@ -1,7 +1,7 @@
 # Air Tickets Warden — Design Document
 
-**Version:** 0.6 (Mini App frontend)
-**Date:** 2026-07-21
+**Version:** 0.7 (live-search sources, alert hardening)
+**Date:** 2026-07-22
 **Status:** Design
 
 ---
@@ -42,9 +42,9 @@ A single person (the bot owner) or a small circle of acquaintances. Not a public
 
 ### Routes
 
-- **Origin:** any airport; alternative departure airports are configurable per subscription.
-- **Destination:** any airport.
+- **Any airport in the world**, both origin and destination — nothing in the system is hardcoded to a region; Belgrade (BEG) appears below only as a running example. Alternative departure airports are configurable per subscription.
 - **Carriers that matter:** Air Serbia, Wizz Air, Ryanair, Lufthansa Group (LH/OS/LX), Turkish, easyJet, Vueling, Pegasus, AJet.
+- **Known coverage gap (accepted for v1.0):** Wizz Air has no API and no GDS presence — it is not covered by any v1.0 source. The UI states this honestly (see Mini App Frontend); a scraper is the top v1.1+ backlog candidate.
 
 ### Technology assumptions
 
@@ -99,7 +99,7 @@ The full stack with rationale — see §9 "Technology stack".
         ┌──────────────────┼──────────────────┐
         ▼                  ▼                  ▼
 ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│  Aviasales   │  │     Kiwi     │  │   Ryanair    │
+│   Amadeus    │  │   Ryanair    │  │ Kiwi/Duffel  │
 │   adapter    │  │   adapter    │  │   adapter    │
 └──────┬───────┘  └──────┬───────┘  └──────┬───────┘
        └──────────────────┼──────────────────┘
@@ -137,10 +137,10 @@ The management UI. A **React 19 + TypeScript** SPA built with **Vite**, opened i
 - **`@telegram-apps/telegram-ui`** — Telegram-native UI kit (cells, lists, modals, tabbar); the app inherits the user's Telegram theme (light/dark, accent colors) automatically.
 - **TanStack Query** for API state (fetch/cache/invalidate); no global state manager beyond it — the app is CRUD-shaped.
 - Screens:
-  - **Subscriptions** — list with status badges; swipe/menu actions (pause, resume, delete).
+  - **Subscriptions** — list with status badges: active / paused / 🔇 muted until … / 📈 collecting price history (warm-up, see Alert Engine); swipe/menu actions (pause, resume, mute, delete).
   - **New/Edit subscription** — a real form at last: airport autocomplete (backed by `GET /api/v1/airports?q=`), native-feeling date-range picker, sliders/steppers for thresholds, toggles for alternative airports. Everything the old inline-keyboard FSM emulated poorly, done as normal web UI.
-  - **Subscription detail / stats** — price history chart (lightweight charting lib, e.g. `recharts`), min/avg/trend, recent alerts, "check now" button.
-  - **Settings** — defaults (cooldown, drop %), mute list.
+  - **Subscription detail / stats** — price history chart (lightweight charting lib, e.g. `recharts`), min/avg/trend, recent alerts, "check now" button (`POST .../check` → `202 {run_id}`, then the app polls `GET .../runs/{run_id}` every ~2 s until `done` and renders the results). A **source-coverage line** — "sources: Amadeus, Ryanair · not covered: Wizz Air" — computed from the adapter registry, so the user always sees the monitoring boundary.
+  - **Settings** — per-user defaults (cooldown, drop %) backed by the `user_settings` table; mute overview.
 - Built assets land in `web/dist/` and are **embedded into the Go binary via `go:embed`** — the same server serves `/` (SPA) and `/api/v1` (JSON). One artifact, no CORS, no separate frontend deploy.
 
 #### HTTP API Layer
@@ -154,18 +154,23 @@ A JSON REST API under `/api/v1`, served by `net/http` (Go 1.22+ pattern routing 
 **Endpoints (v1):**
 
 ```
-GET    /api/v1/me                        — profile, defaults
+GET    /api/v1/me                        — profile + per-user defaults (user_settings)
+PATCH  /api/v1/me                        — update per-user defaults
 GET    /api/v1/subscriptions             — list (with brief status)
 POST   /api/v1/subscriptions             — create
-GET    /api/v1/subscriptions/{id}        — detail
-PATCH  /api/v1/subscriptions/{id}        — edit / pause / resume / dry-run toggle
+GET    /api/v1/subscriptions/{id}        — detail (incl. source-coverage info)
+PATCH  /api/v1/subscriptions/{id}        — edit / pause / resume / mute (muted_until) / dry-run
 DELETE /api/v1/subscriptions/{id}        — delete
-POST   /api/v1/subscriptions/{id}/check  — ad-hoc check (replaces /search; async, 202)
+POST   /api/v1/subscriptions/{id}/check  — ad-hoc check → 202 {run_id}
+GET    /api/v1/subscriptions/{id}/runs/{run_id} — check-run status + results (polled by the app;
+                                           backed by scheduler_runs)
 GET    /api/v1/subscriptions/{id}/stats  — history aggregates + chart series
 GET    /api/v1/subscriptions/{id}/alerts — recent alerts
 GET    /api/v1/airports?q=<text>         — autocomplete over the embedded dataset
 GET    /api/v1/health-summary            — adapter aliveness, last cycle (the old /health command)
 ```
+
+An ad-hoc check runs through **the same code path** as a scheduled cycle (recorded in `scheduler_runs` with `triggered_by = 'manual'`) — no divergence between "check now" and the scheduler.
 
 Input validation server-side as before: IATA codes must exist in the airports dataset, dates parsed with `time.Parse`, ranges checked in the domain layer. The Mini App is a convenience, not a trust boundary.
 
@@ -186,7 +191,7 @@ Reduced to **entry point + notification channel**. Implemented on **`go-telegram
 
 - "Buy" (deep link to the source, optionally with a referral code)
 - "Details" / "Stats" — a `web_app` button opening the Mini App directly on the subscription's detail screen (start-parameter deep link)
-- "Mute alert for this route" — one-tap callback handled by the bot (no need to open the app for the common reaction)
+- "Mute alert for this route" / "Ignore for N days" — one-tap callback handled by the bot (no need to open the app for the common reaction); writes `subscriptions.muted_until`
 
 Self-alerts (quota low, DB big, suspicious silence — §10.1) go through the same channel.
 
@@ -208,20 +213,25 @@ A CRUD layer over monitoring rules, backed by `sqlc`-generated queries. A subscr
 | `max_duration_minutes` | Maximum total trip duration |
 | `airlines_whitelist`, `airlines_blacklist` | Carrier filters |
 | `alert_strategy` | Alert strategy (see Alert Engine) |
-| `cooldown_hours` | Anti-spam between notifications |
+| `cooldown_hours` | Anti-spam between notifications (nullable — falls back to user/env default) |
+| `muted_until` | Notifications suppressed until this time; monitoring and history continue |
 | `status` | active / paused / archived |
+
+Alert parameters resolve through a cascade: **subscription → `user_settings` → env defaults** — a value set at a more specific level wins.
 
 #### Scheduler
 
-Runs subscription check jobs. Not a flat cron — prioritized by date proximity:
+Runs subscription check jobs. Not a flat cron — prioritized by date proximity. Intervals are deliberately conservative while the primary source (Amadeus) has a tight quota; they tighten later once free sources (Ryanair) carry more of the load:
 
-- **High-priority** (departure within 14 days) — every hour
-- **Medium** (15–60 days) — every 4 hours
+- **High-priority** (departure within 14 days) — every 4 hours
+- **Medium** (15–60 days) — every 12 hours
 - **Low** (60+ days) — once a day
 
 **Implementation:** a hand-rolled, **stateless, DB-driven scheduler** instead of a job-queue library. Each subscription row carries `next_check_at`; a single goroutine wakes on a `time.Ticker` (every minute), selects due subscriptions (`WHERE next_check_at <= now() AND status = 'active'`), runs a check cycle for each, and writes the next `next_check_at` according to the priority tier. This gives job persistence for free (state lives in Postgres, survives restart), needs no external queue, and is ~100 lines of Go. Libraries considered — `gocron`, `robfig/cron` — rejected: they add in-memory job state that would need re-syncing with the DB anyway.
 
 **Concurrency:** check cycles for due subscriptions run concurrently, bounded by a semaphore (`golang.org/x/sync/semaphore`, e.g. max 3 concurrent cycles). Inside one cycle, adapter calls fan out via `errgroup.WithContext`.
+
+**Double-fire guard:** a cycle can outlive the one-minute tick, and `next_check_at` is only advanced on completion — so an in-memory "in flight" set (subscription ids currently being checked) prevents the next tick from picking the same subscription twice. In-memory is sufficient for a single instance, and keeps the restart property: a process killed mid-cycle simply reruns the check on the next tick.
 
 **Rate limiting:** each source gets its own **`golang.org/x/time/rate.Limiter`** (token bucket) at the adapter level. The scheduler does not know about external API limits — quota handling is delegated to adapters.
 
@@ -232,6 +242,7 @@ Runs subscription check jobs. Not a flat cron — prioritized by date proximity:
 Before dispatching requests to adapters, expands the route according to user flexibility:
 
 - If a subscription allows alternative airports, it queues requests for each.
+- **Budget-aware ordering:** the primary pair is always queried; alternative pairs are queried in order only while the source's daily budget allows (see Source Adapters). Depth of coverage never starves the primary route.
 - Maintains a lookup table: for each pair (primary airport, alternative airport) — the approximate cost and duration of ground transfer (bus, car).
 - At the aggregation stage, this cost is added to the ticket price for a fair comparison. For example, a ticket from an alternative airport at a lower fare but with a €25 transfer may end up more expensive than a direct departure — the bot computes the effective price for each option.
 
@@ -265,8 +276,8 @@ Where `Flight` is a normalized struct:
 
 ```go
 type Flight struct {
-    Source          string    // "aviasales" | "kiwi" | "ryanair"
-    Price           float64
+    Source          string    // "amadeus" | "ryanair" | ...
+    PriceMinor      int64     // integer minor units (cents) — never float64 for money
     Currency        string
     Origin          string    // IATA
     Destination     string    // IATA
@@ -282,22 +293,25 @@ type Flight struct {
 }
 ```
 
-**Initial set of adapters:**
+**Initial set of adapters (all must return *live* prices — that is the point of the product):**
 
-1. **Aviasales / Travelpayouts adapter** — the foundation. Free API, good coverage of Air Serbia, traditional carriers, partially Wizz Air. The affiliate program provides referral links.
-2. **Kiwi (Tequila) adapter** — better for low-cost carriers, supports virtual interlining. Important for non-standard routes.
-3. **Ryanair adapter** — a direct client for the semi-official `services-api.ryanair.com` endpoint (no Go library exists — the `ryanair-py` request/response shapes serve as the reference for a hand-written client). Covers only Ryanair, but critical when that carrier is not visible in Aviasales.
+1. **Amadeus Self-Service adapter (Flight Offers Search)** — the foundation. Official, **live** search with global GDS coverage (Air Serbia, Lufthansa Group, Turkish, Pegasus, and most traditional carriers, any airport in the world). Free tier is quota-limited (~2000 req/month) — see the daily-budget mechanism below. A half-day **spike precedes the implementation**: live requests against test and prod tiers to confirm current quotas, response quality, and whether easyJet / Vueling / AJet appear in results.
+2. **Ryanair adapter** — a direct client for the semi-official `services-api.ryanair.com` endpoint (no Go library exists — the `ryanair-py` request/response shapes serve as the reference). Live prices, free, no quota; covers only Ryanair. High priority: it takes load off the Amadeus budget.
+3. **Kiwi (Tequila) or Duffel adapter** — LCC coverage and virtual interlining. Kiwi's 2026 status must be verified first (open question §8); Duffel is the fallback.
 
-**Optional extended set:**
+**Trend-only / extended set:**
 
-4. **Amadeus self-service adapter** — 2000 free requests per month. Backup and additional price validation via GDS.
-5. **Wizz Air monitoring** — via site scraping or subscribing to promo mailings (no official API).
+4. **Aviasales / Travelpayouts adapter** — **demoted to a trend-only source (v1.1+)**: its free Data API serves *cached* prices (what other users searched recently), not live searches. Useful to cheaply densify `price_observations` for statistics; flagged `trend_only` in the adapter registry — **its prices never trigger alerts on their own** and never appear as "current price" in notifications.
+5. **Wizz Air monitoring** — via site scraping (no official API, no GDS presence). v1.1+ backlog; until then Wizz is an acknowledged coverage gap surfaced in the UI.
+
+**Adapter registry:** each adapter declares `Name()`, `LiveSource() bool`, and covered-carrier info; the Mini App renders the per-subscription coverage line ("sources: … · not covered: …") from this registry.
 
 **Standard adapter implementation:**
 
 - HTTP client — a shared `*http.Client` with a tuned `Transport` (connection pool, timeouts). No third-party HTTP wrapper.
 - Retry + circuit breaker — **`failsafe-go`**: exponential backoff with jitter on 429/5xx (3 attempts), and a circuit breaker that "trips" a source after N consecutive failures for a cooldown period. Logged to `api_call_log`, separate metric. Protects against quota burn.
 - Rate limit — **`x/time/rate`** token bucket, parameters per source come from the config.
+- **Daily request budget** — an RPS limiter caps speed, not volume, so quota-limited sources (Amadeus) additionally get a configured daily budget (`AMADEUS_DAILY_BUDGET`). The spent count is derived from `api_call_log` (requests today); when exhausted, the adapter returns a typed `ErrBudgetExhausted` — the cycle is marked `partial`, a metric is bumped, and one self-alert per day is sent. No silent quota burn.
 - **Sanity check at the adapter output:** price < `MIN_REASONABLE_PRICE` (e.g., €10) or > `MAX_REASONABLE_PRICE` (€5000) → flagged, not passed to the aggregator, written to the log. Defends against "broken €1 prices" and parsing outliers.
 - Every request is logged to `api_call_log` (endpoint, status, latency, remaining quota, error).
 - A single adapter failure does not crash the whole cycle — the Aggregator collects per-adapter results and errors independently (errgroup with errors captured per goroutine, not propagated as cancellation).
@@ -319,7 +333,7 @@ A write to `price_observations` happens **always** (even on a cache hit) so that
 
 #### Currency Normalizer
 
-Adapters can return prices in different currencies: Aviasales — depending on the `currency` parameter (RUB/USD/EUR), Kiwi — in EUR, Ryanair — in the route's local currency (EUR/GBP/RON/...).
+Adapters can return prices in different currencies: Amadeus — in the requested currency (but not all carriers/markets honor it), Ryanair — in the route's local currency (EUR/GBP/RON/...), Kiwi — in EUR.
 
 All prices in the system are converted to a **base currency (EUR)** before being written to the Price History Store and compared in the Alert Engine. Otherwise `$87 < €100` → false alert.
 
@@ -333,7 +347,7 @@ In each `price_observation` we store **both prices** — the original (`price`, 
 
 Collects results from all adapters, deduplicates, and sorts.
 
-**Dedup key:** `(airline, flight_number, departure_at_date)`. The same physical flight may come back from 3 adapters at different prices — we keep the minimum, but preserve all sources in metadata (for debugging and for displaying "available on: Aviasales, Kiwi").
+**Dedup key:** `(airline, flight_number, departure_at_date)`. The same physical flight may come back from several adapters at different prices — we keep the minimum, but preserve all sources in metadata (for debugging and for displaying "available on: Amadeus, Ryanair").
 
 **Special case — multi-segment flights.** Deduplication uses a composite key across all segments. If any segment differs, these are distinct itineraries.
 
@@ -366,14 +380,18 @@ price_observations (
   flight_signature text,       -- airline+flight_number, for flight identification
   departure_at    timestamptz,
   observed_at     timestamptz, -- UTC
+  hour_bucket     timestamptz, -- observed_at truncated to the hour, set by the INSERT
   outlier         bool default false,
   raw_payload     jsonb
 )
 
 -- Idempotency: the same flight from the same source within one hour
 -- must not enter the DB twice (defense against retries).
+-- hour_bucket is a plain column (filled with date_trunc('hour', now()) in the
+-- INSERT statement) because date_trunc over timestamptz is STABLE, not
+-- IMMUTABLE, and cannot be used in an expression index.
 UNIQUE INDEX idx_obs_dedup ON price_observations (
-  flight_signature, departure_at, source, date_trunc('hour', observed_at)
+  flight_signature, departure_at, source, hour_bucket
 );
 
 -- Indexes for fast aggregates in the Alert Engine
@@ -410,6 +428,10 @@ Decides whether to send a notification. Supports several strategies, selected pe
 
 Each strategy is a value implementing a `Strategy` interface (`Evaluate(ctx, flight, history) (Verdict, error)`); `combined` composes them.
 
+**Warm-up guard (cold start):** history-based strategies (`historical_minimum`, `relative_drop`, `sudden_drop`) are meaningless without history — the first observation on a fresh subscription is trivially a "new minimum". They may not fire until the `route_key` has accumulated at least **K observations across at least D distinct days** (defaults K=10, D=3, configurable). Until then they return a `warming_up` verdict, which is logged but never sent. `absolute_threshold` is exempt — the user set the threshold themselves; it works from the first observation. The Mini App shows warming-up subscriptions as "📈 collecting price history (2/3 days)", and the "suspicious silence" self-alert (§10.1) skips subscriptions still in warm-up.
+
+**Mute check:** after strategy evaluation, a subscription with `muted_until > now()` suppresses sending (decision logged with reason `muted`). Monitoring and history writes continue — mute silences notifications only, unlike pause.
+
 **Anti-spam:**
 
 - Cooldown between alerts per subscription (default 6 hours).
@@ -443,7 +465,7 @@ BEG → BCN
 
 📊 That's −34% off the 30-day average (€132)
 📊 New minimum over the last 60 days
-📊 Available on: Aviasales, Kiwi
+📊 Available on: Amadeus, Ryanair
 
 [Buy] [Details] [Mute alert]
 ```
@@ -471,6 +493,8 @@ The bot runs 24/7 unattended — without observability, a downed adapter or a bu
 - `warden_alerts_sent_total{strategy}` — counter
 - `warden_alerts_suppressed_total{reason}` — counter (cooldown / dedup / stable_price)
 - `warden_subscriptions_active` — gauge
+- `warden_cycle_duration_seconds` — histogram (whole check cycle)
+- `warden_source_budget_remaining{source}` — gauge (daily budget)
 - `warden_db_size_bytes` — gauge
 
 **Error tracking:** **`sentry-go`**. DSN from env, no-op when empty. The free tier (5K errors/month) covers a personal project with room to spare.
@@ -490,20 +514,25 @@ type Config struct {
         AllowedUserIDs []int64 `env:"ALLOWED_USER_IDS,required"`
     }
     Sources struct {
-        AviasalesToken     string `env:"AVIASALES_TOKEN,required"`
-        KiwiAPIKey         string `env:"KIWI_API_KEY"`
-        AmadeusClientID    string `env:"AMADEUS_CLIENT_ID"`
-        AmadeusClientSecret string `env:"AMADEUS_CLIENT_SECRET"`
+        AmadeusClientID     string `env:"AMADEUS_CLIENT_ID,required"`
+        AmadeusClientSecret string `env:"AMADEUS_CLIENT_SECRET,required"`
+        KiwiAPIKey          string `env:"KIWI_API_KEY"`
+        AviasalesToken      string `env:"AVIASALES_TOKEN"` // trend-only source, v1.1+
     }
     RateLimits struct {
-        AviasalesRPS float64 `env:"AVIASALES_RPS" envDefault:"1.0"`
-        KiwiRPS      float64 `env:"KIWI_RPS" envDefault:"0.5"`
-        RyanairRPS   float64 `env:"RYANAIR_RPS" envDefault:"0.3"`
+        AmadeusRPS  float64 `env:"AMADEUS_RPS" envDefault:"1.0"`
+        RyanairRPS  float64 `env:"RYANAIR_RPS" envDefault:"0.3"`
+        KiwiRPS     float64 `env:"KIWI_RPS" envDefault:"0.5"`
     }
-    AlertDefaults struct {
+    Budgets struct {
+        AmadeusDaily int `env:"AMADEUS_DAILY_BUDGET" envDefault:"60"` // requests/day
+    }
+    AlertDefaults struct { // env-level fallbacks; overridable per user (user_settings) and per subscription
         CooldownHours      int     `env:"COOLDOWN_HOURS" envDefault:"6"`
         DropPct            float64 `env:"DROP_PCT" envDefault:"0.25"`
         StablePriceBandPct float64 `env:"STABLE_PRICE_BAND_PCT" envDefault:"0.02"`
+        WarmupMinObs       int     `env:"WARMUP_MIN_OBSERVATIONS" envDefault:"10"`
+        WarmupMinDays      int     `env:"WARMUP_MIN_DAYS" envDefault:"3"`
     }
     Observability struct {
         SentryDSN   string `env:"SENTRY_DSN"`
@@ -527,12 +556,12 @@ Secrets never appear in logs: the config's `String()`/`LogValue()` redacts token
 
 **Scenario:** the user created a subscription BEG → Barcelona (BCN), dates 10–20 July 2026, departure-airport flexibility enabled (BUD, SOF, TSR, ZAG as alternatives), `combined` strategy (threshold €100 OR −25% off the average).
 
-1. The Scheduler tick finds the subscription due (`next_check_at <= now()`; departure ~50 days away → medium tier, every 4 hours). A `trace_id` is generated and attached to the context for end-to-end logging of the whole cycle.
+1. The Scheduler tick finds the subscription due (`next_check_at <= now()`, not in the in-flight set; departure ~50 days away → medium tier, every 12 hours). A `trace_id` is generated and attached to the context for end-to-end logging of the whole cycle; a `scheduler_runs` row is opened with `triggered_by = 'schedule'`.
 2. The Subscription Manager hands over the rule → passed to the Multi-Airport Expander.
-3. The Expander unfolds into pairs for each configured alternative: (BEG, BCN), (BUD, BCN), (SOF, BCN), (TSR, BCN), (ZAG, BCN). For each pair + date range, requests are formed.
+3. The Expander unfolds into pairs for each configured alternative: (BEG, BCN), (BUD, BCN), (SOF, BCN), (TSR, BCN), (ZAG, BCN). The primary pair goes first; alternatives follow while source budgets allow.
 4. **Cache Layer** checks each key `(source, origin, destination, date_from, date_to)`. On a hit, the cached Flight slice is returned. On a miss, the request continues.
-5. Miss requests fan out concurrently (errgroup) into the Aviasales, Kiwi, Ryanair adapters. Each adapter:
-   - Waits on its own rate limiter (`x/time/rate`).
+5. Miss requests fan out concurrently (errgroup) into the Amadeus and Ryanair adapters. Each adapter:
+   - Waits on its own rate limiter (`x/time/rate`) and checks its daily budget (`ErrBudgetExhausted` → skip, cycle marked `partial`).
    - Applies retry/backoff and checks the circuit breaker (`failsafe-go`) — if the adapter is "tripped", the request is skipped.
    - Performs a sanity check on the response.
    - Returns a normalized Flight slice.
@@ -541,10 +570,10 @@ Secrets never appear in logs: the config's `String()`/`LogValue()` redacts token
 7. The Aggregator merges results, deduplicates. For alternative airports, transfer cost is added → `effective_price_eur`.
 8. Every observation is written to the Price History Store (with outlier check; conflicts on the idempotency index are ignored via `ON CONFLICT DO NOTHING`).
 9. The Alert Engine checks the subscription's strategy conditions for every Flight:
-   - Price ≤ €100? → checks.
-   - Price ≤ 30-day average × 0.75? → fetches the average from history (excluding `outlier=true`), checks.
+   - Price ≤ €100? → checks (works from day one).
+   - Price ≤ 30-day average × 0.75? → only if the route is past warm-up (≥ K observations over ≥ D days); fetches the average from history (excluding `outlier=true`), checks.
    - If any matches — alert candidate.
-10. Candidates pass through anti-spam (cooldown, dedup against already sent, stable-price guard).
+10. Candidates pass through anti-spam (mute check, cooldown, dedup against already sent, stable-price guard).
 11. If the subscription is in `dry_run`, a row is written to `alerts_sent` with the flag, without sending to Telegram.
 12. Otherwise, the Notification Layer formats and sends to Telegram. The `message_id` is stored for possible later edits.
 13. `next_check_at` is advanced (tier interval + jitter); cycle metrics (latency, Flights found, alerts generated) are updated in Prometheus.
@@ -565,10 +594,19 @@ subscriptions
   max_price (numeric), max_stops (int), max_duration_minutes (int),
   airlines_whitelist (jsonb), airlines_blacklist (jsonb),
   alert_strategy (text), alert_params (jsonb),
-  cooldown_hours (int), dry_run (bool default false),
+  cooldown_hours (int nullable),             -- null → user_settings → env default
+  dry_run (bool default false),
+  muted_until (timestamptz nullable),        -- notifications suppressed; monitoring continues
   status (text: active/paused/archived),
   next_check_at (timestamptz, indexed),      -- drives the scheduler
   created_at, updated_at (timestamptz)
+
+user_settings                    -- per-user defaults, lazily created on first /start or /me
+  chat_id (bigint pk),
+  cooldown_hours (int),
+  drop_pct (numeric),
+  stable_price_band_pct (numeric),
+  updated_at (timestamptz)
 
 price_observations
   id (bigint pk),
@@ -580,6 +618,7 @@ price_observations
   flight_signature (text) — 'W6-2643',
   departure_at (timestamptz),
   observed_at (timestamptz),
+  hour_bucket (timestamptz),   -- observed_at truncated to the hour, set by the INSERT
   outlier (bool default false),
   raw_payload (jsonb)
 
@@ -617,9 +656,10 @@ fx_rates
 
   PRIMARY KEY (date, currency)
 
-scheduler_runs                 -- for /health and metrics
+scheduler_runs                 -- also the resource behind GET .../runs/{run_id} polling
   id (bigint pk),
   subscription_id (uuid fk),
+  triggered_by (text: schedule/manual),
   started_at, finished_at (timestamptz),
   trace_id (uuid),
   flights_found (int),
@@ -638,7 +678,7 @@ scheduler_runs                 -- for /health and metrics
 
 See **[PLAN.md](PLAN.md)** for the detailed phase-by-phase development plan. Summary:
 
-### MVP (1–2 weeks)
+### MVP
 
 Goal: a working bot for a single route, one source, real alerts. **Already with the baseline infrastructure** so it doesn't need to be redone later.
 
@@ -646,12 +686,12 @@ Goal: a working bot for a single route, one source, real alerts. **Already with 
 
 - Bot: `/start` with "Open App" button, whitelist, plain-text alert delivery.
 - Mini App: subscriptions list + create/delete form (airport autocomplete, date range); HTTP API with initData auth.
-- Subscription Manager on Postgres (sqlc), without alternative airports.
-- One adapter: **Aviasales / Travelpayouts**.
-- Scheduler: DB-driven ticker loop, single tier (hourly).
+- Subscription Manager on Postgres (sqlc), without alternative airports; `user_settings` table.
+- One adapter: **Amadeus Self-Service** (preceded by the coverage/quota spike), with the daily-budget mechanism.
+- Scheduler: DB-driven ticker loop, single conservative tier (every 4 hours), in-flight guard.
 - Currency Normalizer with ECB rates.
 - Price History Store: write + simple "minimum over N days" query.
-- Alert Engine: `absolute_threshold` and `historical_minimum`, cooldown.
+- Alert Engine: `absolute_threshold` and `historical_minimum` with the warm-up guard, cooldown.
 - Notification Layer: text notifications without inline buttons.
 
 **Infrastructure (from day one):**
@@ -663,28 +703,29 @@ Goal: a working bot for a single route, one source, real alerts. **Already with 
 - Table-driven tests with `testify`; adapter tests against `httptest.Server` fixtures.
 - GitHub Actions: `golangci-lint` + `go vet` + tests + build.
 
-### v1.0 (next 1–2 weeks)
+### v1.0
 
-- Kiwi and Ryanair adapters.
+- Ryanair adapter (high priority — free live prices, relieves the Amadeus budget); Kiwi or Duffel adapter.
 - Aggregator with deduplication and sanity check.
 - Cache Layer (in-memory).
 - Multi-Airport Expander with the transfer reference table.
 - Circuit breaker for adapters.
 - Alert Engine: `relative_drop`, `combined`, full anti-spam (cooldown + dedup + stable-price).
-- Inline buttons in notifications (Buy / open-in-app deep link / Mute).
-- Mini App: edit/pause/resume, stats screen with price chart, health panel, settings; Prometheus `/metrics`.
+- Inline buttons in notifications (Buy / open-in-app deep link / Mute via `muted_until`).
+- Mini App: edit/pause/resume/mute, stats screen with price chart, source-coverage line, health panel, settings; Prometheus `/metrics`.
 - Priority tiers in the scheduler; dry-run mode; daily retention job.
 - Postgres backup (pg_dump cron) to a separate volume.
 
 ### v1.1+ (as needed)
 
+- **Wizz Air scraper** (chromedp) — top backlog candidate; prioritize based on real pain after a month of operation.
+- Travelpayouts as a trend-only source (densifies history, never alerts).
 - TimescaleDB for `price_observations`.
 - Redis for the Cache Layer (only if a second process appears).
-- Amadeus / Duffel adapter as a backup.
+- Duffel adapter as a backup.
 - Trend Analyzer — a weekly digest across subscriptions (bot message + Mini App screen).
 - Smart suggestions ("where to fly cheaply from BG this weekend").
 - Round-trip support with two independent tickets on different airlines — requires reworking the Flight model into an Itinerary.
-- Wizz Air monitoring via a headless browser (chromedp / Playwright container).
 
 ---
 
@@ -693,7 +734,9 @@ Goal: a working bot for a single route, one source, real alerts. **Already with 
 | Risk | Mitigation |
 |------|------------|
 | Ryanair adapter ban / block (unofficial API) | Graceful fallback, circuit breaker, do not crash the cycle. Availability monitoring via `/health`. |
-| Free API limits exhausted | Cache Layer (15–60 min), scheduler jittering, prioritization by departure proximity, per-source rate limiter. The `warden_adapter_quota_remaining` metric. |
+| Free API limits exhausted (Amadeus quota) | **Daily budget per source** (hard stop with `ErrBudgetExhausted`, self-alert), Cache Layer, scheduler jittering, conservative check intervals, primary-pair-first expansion. Metrics: `warden_adapter_quota_remaining`, `warden_source_budget_remaining`. |
+| Wizz Air not covered by any v1.0 source | Accepted consciously; the Mini App shows a per-subscription coverage line so the boundary is visible. Scraper is the top v1.1+ candidate. |
+| Alert noise on fresh subscriptions (cold start) | Warm-up guard: history-based strategies silent until ≥ K observations over ≥ D days; UI shows "collecting history" status. |
 | API response schema changes | Strict typed decoding at the adapter output, contract tests with recorded fixtures (`httptest`), `raw_payload` logged in the DB. Sentry alert on a spike in parsing errors. |
 | DB bloat | Retention policy with downsampling and deletion of old observations. The `warden_db_size_bytes` metric. |
 | Notification spam | Cooldown, dedup, stable-price guard (±2%). "Mute alert" button. |
@@ -709,6 +752,15 @@ Goal: a working bot for a single route, one source, real alerts. **Already with 
 ---
 
 ## 8. Open questions
+
+**Resolved in 0.7 (grilling session):**
+
+- ~~Cached or live prices for the foundation adapter?~~ → Live search is the point of the product. Amadeus Self-Service replaces Aviasales/Travelpayouts as the foundation; Travelpayouts demoted to trend-only (v1.1+). A spike verifies Amadeus quotas/coverage before implementation.
+- ~~How does "check now" report back to the Mini App?~~ → Polling: `202 {run_id}` + `GET .../runs/{run_id}` over `scheduler_runs`.
+- ~~Cold start of history-based strategies?~~ → Warm-up guard (K=10 observations / D=3 days), `absolute_threshold` exempt.
+- ~~Quota protection?~~ → Per-source daily budgets + conservative tiers (4h/12h/24h) + primary-pair-first expansion.
+- ~~Where do user settings and mutes live?~~ → `user_settings` table (cascade subscription → user → env) and `subscriptions.muted_until`.
+- ~~Wizz Air coverage?~~ → Accepted gap for v1.0, surfaced in the UI; scraper is the top backlog item.
 
 **Resolved in 0.6 (Mini App):**
 
@@ -930,7 +982,7 @@ air-tickets-warden/
     bot/                — /start, /help, alert delivery, callback handlers, middlewares
     api/                — HTTP handlers /api/v1, initData auth middleware
     domain/             — Subscription, Flight, Segment, alert strategies (pure Go, no I/O)
-    adapters/           — aviasales/, kiwi/, ryanair/ + shared resilient HTTP client
+    adapters/           — amadeus/, ryanair/, ... + shared resilient HTTP client, registry
     services/           — aggregator, alert engine, currency normalizer, expander,
                           subscription manager, airports (embedded dataset)
     scheduler/          — DB-driven ticker loop
@@ -968,14 +1020,14 @@ The dependency rule mirrors the old hexagonal intent: `internal/domain` imports 
 
 ## 11. Source rate limits and quotas (draft)
 
-| Source | Quota | Rate limit | Documentation | Notes |
-|--------|-------|------------|---------------|-------|
-| **Aviasales / Travelpayouts** | no hard limit | ~1 RPS recommended | docs.travelpayouts.com | Confirm current numbers at signup |
-| **Kiwi Tequila** | (deprecated?) | 0.5 RPS | tequila.kiwi.com | **Verify API status in 2026** |
-| **Ryanair (services-api)** | unofficial | low load | reverse-engineered | Ban risk on abuse |
-| **Amadeus self-service** | 2000 req/month (test) | 10 RPS | developers.amadeus.com | Production tier is paid |
-| **Duffel** | up to 1000 req/hour test | — | duffel.com/docs | Test environment is free |
-| **ECB FX rates** | unlimited | politely: 1 request/day | www.ecb.europa.eu | XML feed, refreshed around 16:00 CET on business days |
+| Source | Live? | Quota | Rate limit | Documentation | Notes |
+|--------|-------|-------|------------|---------------|-------|
+| **Amadeus self-service** | **Yes** | ~2000 req/month (test); prod has small free quota, then per-request cents | 10 RPS | developers.amadeus.com | **Foundation.** Verify current tiers on the Phase 2 spike; guarded by `AMADEUS_DAILY_BUDGET` |
+| **Ryanair (services-api)** | **Yes** | unofficial | low load | reverse-engineered | Ban risk on abuse; free, relieves the Amadeus budget |
+| **Kiwi Tequila** | Yes | (deprecated?) | 0.5 RPS | tequila.kiwi.com | **Verify API status in 2026**; Duffel is the fallback |
+| **Duffel** | Yes | up to 1000 req/hour test | — | duffel.com/docs | Test environment is free |
+| **Aviasales / Travelpayouts** | **No — cached prices** | no hard limit | ~1 RPS recommended | docs.travelpayouts.com | Trend-only source (v1.1+): densifies history, never triggers alerts |
+| **ECB FX rates** | — | unlimited | politely: 1 request/day | www.ecb.europa.eu | XML feed, refreshed around 16:00 CET on business days |
 
 **All values are approximate.** Before each production launch — cross-check with the source's current documentation. Recording the actual `rate_limit_remaining` into `api_call_log` gives the real picture.
 
@@ -983,6 +1035,7 @@ The dependency rule mirrors the old hexagonal intent: `internal/domain` imports 
 
 ## 12. Changelog
 
+- **0.7 — 2026-07-22.** **Design review (grilling session) — seven decisions.** (1) Foundation adapter switched Aviasales/Travelpayouts → **Amadeus Self-Service**: the Travelpayouts free API serves cached prices while the product requires live search; Ryanair promoted, Travelpayouts demoted to trend-only (v1.1+); an Amadeus coverage/quota spike precedes Phase 2. (2) "Check now" contract defined: `202 {run_id}` + polling `GET .../runs/{run_id}` over `scheduler_runs` (+ `triggered_by` column). (3) Warm-up guard for history-based alert strategies (K=10 obs / D=3 days; `absolute_threshold` exempt; "collecting history" status in the UI). (4) Per-source daily request budgets (`ErrBudgetExhausted`, `warden_source_budget_remaining`), conservative scheduler tiers (4h/12h/24h), primary-pair-first expansion. (5) New `user_settings` table (cascade subscription → user → env) and `subscriptions.muted_until` (mute silences notifications only). (6) Fixes: `Flight.PriceMinor int64` replaces `Price float64`; explicit `hour_bucket` column replaces the non-immutable `date_trunc` index expression; scheduler in-flight guard against double-fire; orphan metrics added. (7) Wizz Air gap accepted for v1.0 with an honest per-subscription source-coverage line in the UI. Time estimates removed from both documents. "Any airport in the world" principle made explicit.
 - **0.6 — 2026-07-21.** **Telegram Mini App becomes the management UI.** New components: Mini App Frontend (React 19 + TS + Vite, `@telegram-apps/sdk-react`, `telegram-ui`, TanStack Query, recharts; embedded via `go:embed`) and HTTP API Layer (`/api/v1`, `net/http` pattern routing, initData HMAC auth via `init-data-golang`, whitelist middleware). The bot is reduced to entry point (`/start` + web_app button) and notification delivery with inline buttons; the inline-keyboard FSM, `/new` dialog, pickers, and management commands (`/new`, `/list`, `/pause`, `/search`, `/stats`) are removed — replaced by Mini App screens and API endpoints. `go-telegram/ui` dropped from the stack. Docker gains a node build stage and a Caddy TLS sidecar; the compose ingress serves the Mini App over HTTPS. New open question: domain for the HTTPS URL. Charts open question closed (recharts in-app).
 - **0.5 — 2026-07-21.** **Full rewrite of the design for Go.** Stack replaced: aiogram → `go-telegram/bot` + `go-telegram/ui`; SQLAlchemy/Alembic/aiosqlite → PostgreSQL from day one with `pgx` + `sqlc` + `goose` (SQLite stage dropped); APScheduler → hand-rolled DB-driven ticker scheduler (`next_check_at` column); httpx/tenacity/aiolimiter/pybreaker → `net/http` + `failsafe-go` + `x/time/rate`; pydantic-settings → `caarlos0/env`; structlog → `log/slog`; airportsdata → embedded OurAirports dataset; pytest/respx/freezegun → testify/httptest/clockwork/testcontainers. Repository relaid out as `cmd/` + `internal/`. Money moved to `numeric`/minor units. Development plan extracted to PLAN.md. Python implementation removed (available in git history up to commit `bbe5ceb`).
 - **0.4 — 2026-05-24.** Added "Input UX for the `/new` dialog": airport-picker dropdown and inline calendar.

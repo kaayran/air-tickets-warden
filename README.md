@@ -1,6 +1,6 @@
 # Air Tickets Warden
 
-Air ticket price monitor living inside Telegram: a **Mini App** for managing subscriptions and viewing price history, a **bot** that delivers price-drop alerts, and a Go backend that polls Aviasales, Kiwi, and Ryanair in parallel.
+Air ticket price monitor living inside Telegram: a **Mini App** for managing subscriptions and viewing price history, a **bot** that delivers price-drop alerts, and a Go backend that polls live flight-search sources (Amadeus, Ryanair, more later) in parallel.
 
 Tracks price history per route and supports alternative departure airports with ground transfer cost factored in for fair comparison.
 
@@ -10,7 +10,7 @@ Tracks price history per route and supports alternative departure airports with 
 
 ## Status
 
-Design stage (v0.6 — Mini App architecture). The previous Python implementation was removed; it is available in git history up to commit `bbe5ceb`. Implementation follows [PLAN.md](PLAN.md), starting with Phase 0.
+Design stage (v0.7 — live-search sources, alert hardening). The previous Python implementation was removed; it is available in git history up to commit `bbe5ceb`. Implementation follows [PLAN.md](PLAN.md), starting with Phase 0.
 
 ## Architecture in one paragraph
 
@@ -84,7 +84,7 @@ internal/
   bot/              /start, /help, alert delivery, callbacks, middlewares
   api/              /api/v1 handlers, initData auth middleware
   domain/           Subscription, Flight, alert strategies (pure)
-  adapters/         aviasales, kiwi, ryanair + resilient HTTP client
+  adapters/         amadeus, ryanair, ... + resilient HTTP client, registry
   services/         aggregator, alert engine, fx, expander, airports
   scheduler/        DB-driven ticker loop
   storage/          pgx pool, sqlc code, goose runner
