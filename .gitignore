@@ -1,129 +1,64 @@
 ### macOS
-# Finder metadata
 .DS_Store
-
-# Thumbnails
 ._*
 
-# Custom folder icons
-Icon
-
-# Volume root files
-.DocumentRevisions-V100
-.fseventsd
-.Spotlight-V100
-.TemporaryItems
-.Trashes
-.VolumeIcon.icns
-.com.apple.timemachine.donotpresent
-
 ### Windows
-# Windows thumbnail cache files
 Thumbs.db
-
-# Folder config file
 [Dd]esktop.ini
-
-# Recycle Bin used on file shares
 $RECYCLE.BIN/
-
-# Windows shortcuts
 *.lnk
 
 ### Linux
-# Backup files
 *~
-
-# Temporary files from deleted open files
 .fuse_hidden*
-
-# KDE directory preferences
 .directory
-
-# Linux trash folder
 .Trash-*
-
-# NFS temporary files
 .nfs*
 
 ### JetBrains
-# JetBrains IDE directory
 .idea/
-
-# CMake build directories
-cmake-build-*/
-
-# File-based project format
 *.iws
 *.iml
 
-# IntelliJ build output
-out/
-
 ### VS Code
-# VSCode settings (keep shared configuration)
 .vscode/*
 !.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
-
-# Local History for Visual Studio Code
 .history/
 
-# Built Visual Studio Code Extensions
-*.vsix
+### Go
+# Build artifacts
+/bin/
+/dist/
+warden
+warden.exe
+*.exe~
 
-### Python
-# Byte-compiled files
-__pycache__/
-*.py[cod]
-*$py.class
+# Test & coverage
+*.test
+*.out
+coverage.html
 
-# C extensions
-*.so
+# Go workspace
+go.work
+go.work.sum
 
-# Distribution / packaging
-build/
-dist/
-*.egg-info/
-*.egg
+# Fuzzing
+testdata/fuzz/
 
+### Frontend (web/)
+node_modules/
+web/dist/
+*.tsbuildinfo
+.vite/
+
+### Project-specific
 # dotenv environment variable files
 .env
 
-# Virtual environments
-.venv
-env/
-venv/
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.pytest_cache/
-
-# Type checkers
-.mypy_cache/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# pyenv
-# .python-version
-
-### Project-specific
-# Local SQLite database files
-*.sqlite
-*.sqlite3
-*.db
+# Local DB dumps / data
+*.dump
+*.sql.gz
 data/
-
-# uv
-.venv/
-uv.lock.bak
-
-# Ruff cache
-.ruff_cache/

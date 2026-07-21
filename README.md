@@ -1,108 +1,108 @@
 # Air Tickets Warden
 
-Telegram bot that monitors air ticket prices and sends alerts when prices drop.
+Air ticket price monitor living inside Telegram: a **Mini App** for managing subscriptions and viewing price history, a **bot** that delivers price-drop alerts, and a Go backend that polls Aviasales, Kiwi, and Ryanair in parallel.
 
-Polls Aviasales, Kiwi, and Ryanair in parallel. Tracks price history per route and supports alternative departure airports with ground transfer cost factored in for fair comparison.
+Tracks price history per route and supports alternative departure airports with ground transfer cost factored in for fair comparison.
 
-**Stack:** Python 3.12, aiogram 3.x, SQLAlchemy 2.x + Alembic, APScheduler, SQLite → PostgreSQL, Docker.
+**Stack:** Go 1.24+, PostgreSQL 16 (pgx v5 + sqlc + goose), [go-telegram/bot](https://github.com/go-telegram/bot); frontend — React 19 + TypeScript + Vite ([@telegram-apps/sdk-react](https://github.com/Telegram-Mini-Apps/telegram-apps), telegram-ui) embedded into the Go binary; Caddy for TLS; Prometheus, Sentry, Docker.
 
-**Design document:** [air-tickets-warden.md](air-tickets-warden.md)
+**Design document:** [air-tickets-warden.md](air-tickets-warden.md) · **Development plan:** [PLAN.md](PLAN.md)
 
 ## Status
 
-Phase 0 — bot scaffolding only. All commands are stubs. Real adapters (Aviasales, Kiwi, Ryanair), Scheduler, Aggregator, and Alert Engine arrive in v1.0.
+Design stage (v0.6 — Mini App architecture). The previous Python implementation was removed; it is available in git history up to commit `bbe5ceb`. Implementation follows [PLAN.md](PLAN.md), starting with Phase 0.
+
+## Architecture in one paragraph
+
+The Mini App (React SPA) is the only management UI — Telegram opens it over HTTPS and injects signed `initData`, which the backend validates (HMAC on the bot token) to authenticate every `/api/v1` request. The bot keeps just `/start` (with an "Open App" button), `/help`, and alert delivery — a Mini App can't push anything while closed, so notifications always arrive as bot messages. The Go binary serves the SPA (via `go:embed`), the JSON API, `/health`, `/metrics`, runs the scheduler and adapters; Postgres holds everything; Caddy terminates TLS.
 
 ## Run with Docker
 
 ```bash
-cp .env.example .env  # fill in BOT_TOKEN and ALLOWED_USER_IDS
+cp .env.example .env  # fill in BOT_TOKEN, ALLOWED_USER_IDS, PUBLIC_URL
 docker compose -f docker/docker-compose.yml up --build
 ```
 
-The bot starts polling Telegram and exposes `/health` and `/metrics` on port 9090.
+Compose starts Postgres, the app, and Caddy. The app applies migrations, starts polling Telegram, and serves the Mini App + API behind Caddy; `/health` and `/metrics` are on port 9090.
 
 ## Development
 
-### One-time setup (macOS)
+### Prerequisites
 
-```bash
-# Homebrew (skip if installed)
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-# uv — manages Python and project dependencies
-curl -LsSf https://astral.sh/uv/install.sh | sh
-# restart shell or: source ~/.zshrc
-
-# Docker Desktop — needed for `make docker`
-brew install --cask docker
-```
+- Go 1.24+ — https://go.dev/dl/
+- Node.js 22+ (frontend build)
+- Docker (Postgres, container build)
+- Tools (installed via `go install`, pinned in the Makefile): `sqlc`, `goose`, `golangci-lint`
+- A tunnel for local Mini App testing: [cloudflared](https://github.com/cloudflare/cloudflared) or ngrok — Telegram can only open the Mini App from a public HTTPS URL
 
 ### Project bootstrap
 
 ```bash
 git clone <repo> && cd air-tickets-warden
 
-uv python install 3.12
-uv sync                           # installs runtime + dev deps into .venv
-
 cp .env.example .env              # fill in BOT_TOKEN, ALLOWED_USER_IDS
-make migrate                      # alembic upgrade head
-make run                          # start the bot
+docker compose -f docker/docker-compose.yml up -d postgres
 
-# In another terminal:
-curl -s localhost:9090/health     # {"status":"ok","db":"ok"}
-curl -s localhost:9090/metrics    # Prometheus exposition
+make migrate                      # goose up
+make web-build                    # vite build → web/dist (embedded on next go build)
+make run                          # start the backend + bot
+
+# Frontend dev loop (hot reload, proxies /api to the Go server):
+cd web && npm run dev
+
+# Expose to Telegram for on-device testing:
+make tunnel                       # cloudflared → prints an HTTPS URL; set it as PUBLIC_URL
 ```
 
 ### Telegram setup
 
-1. Talk to [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token to `BOT_TOKEN` in `.env`.
-2. Talk to [@userinfobot](https://t.me/userinfobot) → copy your numeric id to `ALLOWED_USER_IDS` (comma-separated for several users).
-3. Open your bot, hit **Start**, try `/help`.
+1. [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token to `BOT_TOKEN` in `.env`.
+2. [@userinfobot](https://t.me/userinfobot) → copy your numeric id to `ALLOWED_USER_IDS` (comma-separated for several users).
+3. BotFather → `/newapp` (or Bot Settings → Configure Mini App) → set the Mini App URL to your `PUBLIC_URL` (the tunnel URL during development).
+4. Open your bot, hit **Start** → **Open App**.
 
 ### Common commands
 
-| Make target  | What it runs                                                  |
-|--------------|---------------------------------------------------------------|
-| `make run`   | `uv run python -m warden.main` — starts the bot               |
-| `make test`  | `pytest --cov` with 80% threshold                             |
-| `make lint`  | `ruff check` + `ruff format --check` + `mypy --strict`        |
-| `make fmt`   | `ruff format` + `ruff check --fix`                            |
-| `make migrate` | `alembic upgrade head`                                      |
-| `make revision m="add foo"` | autogenerate a new migration                   |
-| `make docker`| `docker compose up --build`                                   |
-| `make clean` | wipe caches and local SQLite                                  |
-
-### Cursor / VS Code
-
-`.vscode/settings.json`, `launch.json`, and `extensions.json` are committed. On first open Cursor will suggest the recommended extensions:
-
-- **Python** + **Pylance**
-- **Ruff** — format-on-save and lint fixes
-- **Even Better TOML** — for `pyproject.toml`
-- **Docker** — for the `docker/` folder
-
-F5 runs the bot with the `.env` loaded. The "pytest: all" launch profile runs the full suite.
+| Make target | What it runs |
+|-------------|--------------|
+| `make run` | `go run ./cmd/warden` — backend + bot |
+| `make test` | `go test -short ./...` with coverage |
+| `make test-integration` | full tests incl. testcontainers Postgres |
+| `make lint` | `golangci-lint run` + `go vet ./...` + `npm run lint` |
+| `make fmt` | `gofumpt -w .` |
+| `make web-build` | `npm run build` in `web/` → `web/dist` |
+| `make sqlc` | regenerate query code from `db/queries/` |
+| `make migrate` | `goose up` against `DATABASE_URL` |
+| `make tunnel` | cloudflared tunnel to the local server |
+| `make docker` | `docker compose up --build` |
 
 ### Repository layout
 
 ```
-src/warden/
-  bot/              aiogram handlers, FSM, middlewares
-  infrastructure/   db, web (/health, /metrics), telemetry
-  config.py         pydantic-settings
-  main.py           entrypoint (bot + web + graceful shutdown)
-tests/
-  unit/ integration/ e2e/
-alembic/            migrations
-docker/             Dockerfile + docker-compose.yml
+cmd/warden/         entrypoint (run / migrate / replay subcommands)
+internal/
+  bot/              /start, /help, alert delivery, callbacks, middlewares
+  api/              /api/v1 handlers, initData auth middleware
+  domain/           Subscription, Flight, alert strategies (pure)
+  adapters/         aviasales, kiwi, ryanair + resilient HTTP client
+  services/         aggregator, alert engine, fx, expander, airports
+  scheduler/        DB-driven ticker loop
+  storage/          pgx pool, sqlc code, goose runner
+  cache/            in-memory TTL cache
+  telemetry/        slog, prometheus, sentry
+  config/           env config
+  web/              HTTP server: embedded SPA, /health, /metrics
+web/                React Mini App (src/, vite.config.ts; dist/ is gitignored)
+db/migrations/      goose SQL (embedded)
+db/queries/         sqlc SQL
+docker/             Dockerfile + docker-compose.yml + Caddyfile
 ```
 
 ### Observability
 
-- **Logs** — JSON via `structlog` when `LOG_JSON=true` (default in prod). Each request carries `trace_id`, `user_id`, `command`, `duration_ms`.
-- **Metrics** — Prometheus exposition at `GET /metrics`. Counters for updates received, dropped (whitelist), and a `warden_command_duration_seconds` histogram.
-- **Health** — `GET /health` returns 200 if DB ping succeeds, 503 otherwise. Hook UptimeRobot to this URL.
+- **Logs** — JSON via `slog`. Each check cycle carries a `trace_id`.
+- **Metrics** — Prometheus at `GET /metrics` (adapter latency/status, alerts sent/suppressed, active subscriptions).
+- **Health** — `GET /health` returns 200 if the DB ping succeeds, 503 otherwise. Hook UptimeRobot to this URL. The Mini App shows a human-readable health panel from `/api/v1/health-summary`.
 - **Errors** — Sentry (set `SENTRY_DSN` in `.env`). No-op when DSN is empty.
 
 ## License
