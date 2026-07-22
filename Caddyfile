@@ -1,0 +1,9 @@
+# TLS ingress for the Mini App. Set WARDEN_DOMAIN to a real hostname in prod for
+# automatic Let's Encrypt; defaults to localhost (Caddy's internal self-signed
+# CA) so `docker compose up` works out of the box.
+#
+# In local dev we normally use `make dev` (host binary + cloudflared) instead of
+# this stack; Caddy is here for the production-shaped `docker compose up`.
+{$WARDEN_DOMAIN:localhost} {
+	reverse_proxy app:8080
+}

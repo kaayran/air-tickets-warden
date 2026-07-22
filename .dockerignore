@@ -1,0 +1,11 @@
+.git
+.github
+web/node_modules
+web/dist
+bin
+*.md
+docs
+.env
+.env.example
+.mcp.json
+scripts

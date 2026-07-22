@@ -1,0 +1,53 @@
+# Local dev normally uses `make dev` (host binary + cloudflared) with only the
+# postgres service. `docker compose up` brings up the full production-shaped
+# stack: app (embedded Mini App) behind a Caddy TLS sidecar.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: warden
+      POSTGRES_PASSWORD: warden
+      POSTGRES_DB: warden
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U warden -d warden"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    env_file: .env
+    environment:
+      # Override for in-network addressing (env_file values are the host-dev defaults).
+      DATABASE_URL: postgres://warden:warden@postgres:5432/warden?sslmode=disable
+      HTTP_PORT: "8080"
+      # Public URL the bot's web_app button points at; the Caddy domain in this stack.
+      PUBLIC_URL: ${PUBLIC_URL:-https://localhost}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      WARDEN_DOMAIN: ${WARDEN_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
