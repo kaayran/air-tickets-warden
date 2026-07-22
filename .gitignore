@@ -29,11 +29,11 @@ $RECYCLE.BIN/
 .history/
 
 ### Go
-# Build artifacts
+# Build artifacts (anchored to repo root so cmd/warden/ is NOT ignored)
 /bin/
 /dist/
-warden
-warden.exe
+/warden
+/warden.exe
 *.exe~
 
 # Test & coverage
@@ -50,7 +50,8 @@ testdata/fuzz/
 
 ### Frontend (web/)
 node_modules/
-web/dist/
+web/dist/*
+!web/dist/.gitkeep
 *.tsbuildinfo
 .vite/
 
