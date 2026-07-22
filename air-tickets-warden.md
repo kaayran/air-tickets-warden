@@ -1016,6 +1016,44 @@ air-tickets-warden/
 
 The dependency rule mirrors the old hexagonal intent: `internal/domain` imports nothing from the outer packages; `adapters`/`storage`/`bot` depend inward. Everything under `internal/` — nothing is importable from outside the module.
 
+### 10.6. Developer tooling — Postgres MCP for AI-assisted development
+
+A **Model Context Protocol (MCP)** server exposes the local development database to an AI coding assistant (Claude Code and any MCP-capable client), so the agent can inspect schema and query data directly instead of shelling out to `psql`. This is **development-time tooling only** — it is never bundled into the app image, never runs in production, and is not part of the product's runtime (contrast with a possible future *product* MCP server exposing Warden's services to end-user agents, which is out of scope here).
+
+**Why it helps.** Most of Warden's behaviour is data-shaped — `subscriptions.next_check_at` scheduling, `price_observations` history aggregates, `scheduler_runs` outcomes, `alerts_sent` dedup, `fx_rates` freshness. Giving the assistant read access to these tables lets it verify migrations, reason about scheduler due-selection, debug why an alert did or didn't fire, and sanity-check FX normalization against real rows — without a human relaying query output.
+
+**Server.** Use an off-the-shelf Postgres MCP server (e.g. `@modelcontextprotocol/server-postgres` or `crystaldba/postgres-mcp`) pointed at the dev database — no Warden code required. It is registered in the project's Claude Code config (`.mcp.json` at the repo root, checked in so the setup is shared; connection string comes from the environment, never hard-coded).
+
+```jsonc
+// .mcp.json  (repo root; the URL resolves from env, no secrets in git)
+{
+  "mcpServers": {
+    "warden-db": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres",
+               "${WARDEN_MCP_DATABASE_URL}"]
+    }
+  }
+}
+```
+
+**Safety rules (non-negotiable).**
+
+- **Dev/local database only.** Never point the MCP server at production or at a database holding real user data. Use the compose `postgres` service or a throwaway instance.
+- **Read-only role.** Connect with a dedicated, `GRANT SELECT`-only Postgres role (`warden_ro`) — the agent inspects data, it does not mutate it. Schema changes always go through `goose` migrations under review, never through the MCP connection.
+- **No secrets in git.** The connection string lives in `.env` / the shell (`WARDEN_MCP_DATABASE_URL`), referenced by env expansion in `.mcp.json`; the URL for the read-only role carries no production credentials. `.gitignore` already covers `.env`.
+- **Scope.** The MCP server is a convenience for the developer's assistant, not a trust boundary and not a supported interface — it may be removed at any time with zero impact on the app.
+
+A one-time SQL snippet provisions the read-only role against the dev database:
+
+```sql
+CREATE ROLE warden_ro LOGIN PASSWORD '...';        -- dev only
+GRANT CONNECT ON DATABASE warden TO warden_ro;
+GRANT USAGE ON SCHEMA public TO warden_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO warden_ro;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO warden_ro;
+```
+
 ---
 
 ## 11. Source rate limits and quotas (draft)
@@ -1035,6 +1073,7 @@ The dependency rule mirrors the old hexagonal intent: `internal/domain` imports 
 
 ## 12. Changelog
 
+- **0.8 — 2026-07-22.** **Developer tooling: Postgres MCP for AI-assisted development.** New §10.6 documents a Model Context Protocol server exposing the *local dev* database to an AI coding assistant (schema inspection, data queries in place of manual `psql`). Development-time only — never shipped, never pointed at production; connects with a `SELECT`-only `warden_ro` role via a checked-in `.mcp.json` whose connection string resolves from env (`WARDEN_MCP_DATABASE_URL`, no secrets in git). Schema changes stay on the `goose` migration path. A product-facing MCP server (Warden services exposed to end-user agents) is explicitly out of scope. PLAN.md Phase 0 gains a matching setup step.
 - **0.7 — 2026-07-22.** **Design review (grilling session) — seven decisions.** (1) Foundation adapter switched Aviasales/Travelpayouts → **Amadeus Self-Service**: the Travelpayouts free API serves cached prices while the product requires live search; Ryanair promoted, Travelpayouts demoted to trend-only (v1.1+); an Amadeus coverage/quota spike precedes Phase 2. (2) "Check now" contract defined: `202 {run_id}` + polling `GET .../runs/{run_id}` over `scheduler_runs` (+ `triggered_by` column). (3) Warm-up guard for history-based alert strategies (K=10 obs / D=3 days; `absolute_threshold` exempt; "collecting history" status in the UI). (4) Per-source daily request budgets (`ErrBudgetExhausted`, `warden_source_budget_remaining`), conservative scheduler tiers (4h/12h/24h), primary-pair-first expansion. (5) New `user_settings` table (cascade subscription → user → env) and `subscriptions.muted_until` (mute silences notifications only). (6) Fixes: `Flight.PriceMinor int64` replaces `Price float64`; explicit `hour_bucket` column replaces the non-immutable `date_trunc` index expression; scheduler in-flight guard against double-fire; orphan metrics added. (7) Wizz Air gap accepted for v1.0 with an honest per-subscription source-coverage line in the UI. Time estimates removed from both documents. "Any airport in the world" principle made explicit.
 - **0.6 — 2026-07-21.** **Telegram Mini App becomes the management UI.** New components: Mini App Frontend (React 19 + TS + Vite, `@telegram-apps/sdk-react`, `telegram-ui`, TanStack Query, recharts; embedded via `go:embed`) and HTTP API Layer (`/api/v1`, `net/http` pattern routing, initData HMAC auth via `init-data-golang`, whitelist middleware). The bot is reduced to entry point (`/start` + web_app button) and notification delivery with inline buttons; the inline-keyboard FSM, `/new` dialog, pickers, and management commands (`/new`, `/list`, `/pause`, `/search`, `/stats`) are removed — replaced by Mini App screens and API endpoints. `go-telegram/ui` dropped from the stack. Docker gains a node build stage and a Caddy TLS sidecar; the compose ingress serves the Mini App over HTTPS. New open question: domain for the HTTPS URL. Charts open question closed (recharts in-app).
 - **0.5 — 2026-07-21.** **Full rewrite of the design for Go.** Stack replaced: aiogram → `go-telegram/bot` + `go-telegram/ui`; SQLAlchemy/Alembic/aiosqlite → PostgreSQL from day one with `pgx` + `sqlc` + `goose` (SQLite stage dropped); APScheduler → hand-rolled DB-driven ticker scheduler (`next_check_at` column); httpx/tenacity/aiolimiter/pybreaker → `net/http` + `failsafe-go` + `x/time/rate`; pydantic-settings → `caarlos0/env`; structlog → `log/slog`; airportsdata → embedded OurAirports dataset; pytest/respx/freezegun → testify/httptest/clockwork/testcontainers. Repository relaid out as `cmd/` + `internal/`. Money moved to `numeric`/minor units. Development plan extracted to PLAN.md. Python implementation removed (available in git history up to commit `bbe5ceb`).
@@ -1063,5 +1102,6 @@ The dependency rule mirrors the old hexagonal intent: `internal/domain` imports 
 - **Idempotency** — the property of an operation where repeating it doesn't change the result. Implemented via UNIQUE indexes + `ON CONFLICT DO NOTHING`.
 - **Outlier** — a statistical anomaly. In context — a suspicious price that does not participate in history aggregates.
 - **Downsampling** — reducing the sampling frequency of a time series (e.g., hourly → daily) to save storage.
+- **MCP** — Model Context Protocol. An open protocol standardizing how an AI agent connects to external tools and data via typed *tools*, *resources*, and *prompts*. In this project it is used purely as **developer tooling**: a Postgres MCP server gives the coding assistant read-only access to the dev database (§10.6). It is not part of the app runtime.
 - **Dry-run** — a mode in which an operation runs but has no side effects. For subscriptions — an alert is written to the DB but not sent.
 - **errgroup** — `golang.org/x/sync/errgroup`; structured concurrent fan-out with shared context cancellation.

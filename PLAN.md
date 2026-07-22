@@ -19,8 +19,9 @@ Goal: an empty but production-shaped service: Go binary serving an embedded Reac
 7. **Dev loop.** Vite dev server proxying `/api` to the Go server; cloudflared/ngrok tunnel target documented in README (Telegram must reach a HTTPS URL to open the Mini App).
 8. **Lifecycle.** `signal.NotifyContext`, ordered graceful shutdown (bot → HTTP server → in-flight work → pool → Sentry flush).
 9. **Docker & CI.** Multi-stage Dockerfile (node → go → distroless), compose: app + `postgres:16-alpine` + Caddy (Caddyfile with the chosen domain); `ci.yml`: golangci-lint, `go vet`, `go test -short`, `npm lint/test/build`, sqlc drift check, image build.
+10. **Dev tooling — Postgres MCP** (see design §10.6). Provision a `SELECT`-only `warden_ro` role against the *dev* database; add a checked-in `.mcp.json` at the repo root registering a Postgres MCP server (`@modelcontextprotocol/server-postgres`) whose connection string resolves from `WARDEN_MCP_DATABASE_URL` (env only, no secrets in git — add the var to `.env.example`). Document the one-time role setup in the README. This gives the AI coding assistant read-only access to the schema and data for the rest of the build. **Local dev only — never production, never shipped in the image.**
 
-**Exit criteria:** `docker compose up` → Mini App shell opens from the bot's button and shows data from `/api/v1/me`; non-whitelisted users are rejected in both bot and API; CI green.
+**Exit criteria:** `docker compose up` → Mini App shell opens from the bot's button and shows data from `/api/v1/me`; non-whitelisted users are rejected in both bot and API; CI green; the AI assistant can query the dev DB read-only through the registered MCP server.
 
 ## Phase 1 — Subscriptions: API + Mini App CRUD
 
