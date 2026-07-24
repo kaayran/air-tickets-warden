@@ -5,13 +5,41 @@
 package sqlcgen
 
 import (
-	"github.com/jackc/pgx/v5/pgtype"
+	"time"
 )
 
+type Subscription struct {
+	ID                 string     `json:"id"`
+	UserChatID         int64      `json:"user_chat_id"`
+	Origin             string     `json:"origin"`
+	OriginAlternatives []string   `json:"origin_alternatives"`
+	Destinations       []string   `json:"destinations"`
+	DateFrom           time.Time  `json:"date_from"`
+	DateTo             time.Time  `json:"date_to"`
+	ReturnDateFrom     *time.Time `json:"return_date_from"`
+	ReturnDateTo       *time.Time `json:"return_date_to"`
+	TripLengthMin      *int32     `json:"trip_length_min"`
+	TripLengthMax      *int32     `json:"trip_length_max"`
+	MaxPriceMinor      *int64     `json:"max_price_minor"`
+	MaxStops           *int32     `json:"max_stops"`
+	MaxDurationMinutes *int32     `json:"max_duration_minutes"`
+	AirlinesWhitelist  []string   `json:"airlines_whitelist"`
+	AirlinesBlacklist  []string   `json:"airlines_blacklist"`
+	AlertStrategy      string     `json:"alert_strategy"`
+	CooldownHours      *int32     `json:"cooldown_hours"`
+	DropPct            *float64   `json:"drop_pct"`
+	StablePriceBandPct *float64   `json:"stable_price_band_pct"`
+	MutedUntil         *time.Time `json:"muted_until"`
+	Status             string     `json:"status"`
+	NextCheckAt        time.Time  `json:"next_check_at"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
 type UserSetting struct {
-	ChatID             int64              `json:"chat_id"`
-	CooldownHours      *int32             `json:"cooldown_hours"`
-	DropPct            *float64           `json:"drop_pct"`
-	StablePriceBandPct *float64           `json:"stable_price_band_pct"`
-	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	ChatID             int64     `json:"chat_id"`
+	CooldownHours      *int32    `json:"cooldown_hours"`
+	DropPct            *float64  `json:"drop_pct"`
+	StablePriceBandPct *float64  `json:"stable_price_band_pct"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
