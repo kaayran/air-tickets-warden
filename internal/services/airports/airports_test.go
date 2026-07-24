@@ -1,6 +1,7 @@
 package airports
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/kaayran/air-tickets-warden/internal/domain"
@@ -103,14 +104,45 @@ func TestSearch(t *testing.T) {
 		}
 	})
 
-	t.Run("short queries return nothing", func(t *testing.T) {
-		if got := svc.Search("b", 5); got != nil {
-			t.Errorf("one-letter query returned %d results", len(got))
+	t.Run("one-letter queries search", func(t *testing.T) {
+		got := svc.Search("b", 5)
+		if len(got) == 0 {
+			t.Fatal("Search(b) found nothing")
+		}
+		if first := got[0]; !strings.HasPrefix(fold(first.City), "b") && !strings.HasPrefix(first.IATA, "B") {
+			t.Errorf("Search(b)[0] = %s (%s) matches neither city nor code prefix", first.IATA, first.City)
+		}
+	})
+
+	t.Run("empty queries return nothing", func(t *testing.T) {
+		if got := svc.Search("", 5); got != nil {
+			t.Error("empty query returned results")
 		}
 		if got := svc.Search("  ", 5); got != nil {
 			t.Error("whitespace query returned results")
 		}
 	})
+}
+
+func TestPopular(t *testing.T) {
+	svc := load(t)
+
+	got := svc.Popular(20)
+	if len(got) != 20 {
+		t.Fatalf("Popular(20) = %d results", len(got))
+	}
+	for i, a := range got {
+		if a.Type != "large_airport" || !a.Scheduled {
+			t.Errorf("Popular[%d] = %s (%s, scheduled=%v), want large scheduled", i, a.IATA, a.Type, a.Scheduled)
+		}
+		if i > 0 && got[i-1].City > a.City {
+			t.Errorf("Popular not city-alphabetical: %q > %q", got[i-1].City, a.City)
+		}
+	}
+
+	if all := svc.Popular(0); len(all) == 0 {
+		t.Error("Popular(0) should return the full list")
+	}
 }
 
 func first(a []Airport) string {

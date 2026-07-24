@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { Subscription } from '../api'
 import {
+  addDays,
   emptyForm,
   eurosToMinor,
+  firstInvalidStep,
   fromSubscription,
   isValid,
+  stepErrors,
   toCreatePayload,
   toPatchPayload,
   todayISO,
@@ -114,6 +117,16 @@ describe('validate', () => {
       expect(validate({ ...validForm(), maxPriceEur: bad }, TODAY).maxPriceEur).toBeDefined()
     }
   })
+
+  it('does not require a price for the historical-minimum strategy', () => {
+    const v = { ...validForm(), alertStrategy: 'historical_minimum', maxPriceEur: '' }
+    expect(validate(v, TODAY)).toEqual({})
+  })
+
+  it('still rejects a malformed price under historical minimum', () => {
+    const v = { ...validForm(), alertStrategy: 'historical_minimum', maxPriceEur: '-5' }
+    expect(validate(v, TODAY).maxPriceEur).toBeDefined()
+  })
 })
 
 describe('payloads', () => {
@@ -133,8 +146,25 @@ describe('payloads', () => {
       date_to: '2030-07-15',
       return_date_from: null,
       return_date_to: null,
+      alert_strategy: 'absolute_threshold',
       max_price_minor: 15000,
       max_stops: null,
+    })
+  })
+
+  it('sends a null price (not 0) for a thresholdless drop subscription', () => {
+    const v = { ...validForm(), alertStrategy: 'historical_minimum', maxPriceEur: '' }
+    const payload = toCreatePayload(v) as { alert_strategy: string; max_price_minor: number | null }
+    expect(payload.alert_strategy).toBe('historical_minimum')
+    expect(payload.max_price_minor).toBeNull()
+  })
+
+  it('diffs the strategy and clears the price with null', () => {
+    const sub = subscription()
+    const edited = { ...fromSubscription(sub), alertStrategy: 'historical_minimum', maxPriceEur: '' }
+    expect(toPatchPayload(edited, sub)).toEqual({
+      alert_strategy: 'historical_minimum',
+      max_price_minor: null,
     })
   })
 
@@ -171,5 +201,31 @@ describe('payloads', () => {
 describe('todayISO', () => {
   it('formats the civil date', () => {
     expect(todayISO(new Date(2030, 0, 5))).toBe('2030-01-05')
+  })
+})
+
+describe('addDays', () => {
+  it('adds within a month', () => {
+    expect(addDays('2030-07-15', 7)).toBe('2030-07-22')
+  })
+  it('crosses month and year boundaries', () => {
+    expect(addDays('2030-07-28', 7)).toBe('2030-08-04')
+    expect(addDays('2030-12-30', 7)).toBe('2031-01-06')
+  })
+})
+
+describe('wizard steps', () => {
+  it('filters errors down to the current page', () => {
+    const errors = validate(emptyForm, TODAY)
+    expect(Object.keys(stepErrors('from', errors))).toEqual(['origin'])
+    expect(Object.keys(stepErrors('to', errors))).toEqual(['destinations'])
+    expect(stepErrors('summary', errors)).toEqual({})
+  })
+
+  it('points the confirm at the earliest failing page', () => {
+    expect(firstInvalidStep(validate(emptyForm, TODAY))).toBe('from')
+    const noPrice = { ...validForm(), maxPriceEur: '' }
+    expect(firstInvalidStep(validate(noPrice, TODAY))).toBe('alert')
+    expect(firstInvalidStep(validate(validForm(), TODAY))).toBeNull()
   })
 })

@@ -80,7 +80,7 @@ export function SubscriptionsList({ onCreate, onEdit }: SubscriptionsListProps) 
   return (
     <List>
       <Section header="Subscriptions">
-        <ButtonCell onClick={onCreate}>＋ New subscription</ButtonCell>
+        <ButtonCell onClick={onCreate}>New subscription</ButtonCell>
         {subs.map((s) => {
           const muted = isMuted(s)
           const paused = s.status === 'paused'
@@ -89,8 +89,8 @@ export function SubscriptionsList({ onCreate, onEdit }: SubscriptionsListProps) 
               <Cell
                 multiline
                 onClick={() => onEdit(s)}
-                subtitle={`${formatDateRange(s.date_from, s.date_to)}${
-                  s.max_price_minor != null ? ` · below ${formatPrice(s.max_price_minor)}` : ''
+                subtitle={`${formatDateRange(s.date_from, s.date_to)} · ${
+                  s.max_price_minor != null ? `below ${formatPrice(s.max_price_minor)}` : 'on price drop'
                 }`}
                 after={
                   <span style={{ display: 'flex', gap: 4 }}>
@@ -113,9 +113,7 @@ export function SubscriptionsList({ onCreate, onEdit }: SubscriptionsListProps) 
                   onClick={() =>
                     patchMutation.mutate({ id: s.id, patch: { status: paused ? 'active' : 'paused' } })
                   }
-                >
-                  {paused ? '▶' : '⏸'}
-                </InlineButtons.Item>
+                />
                 <InlineButtons.Item
                   text={muted ? 'Unmute' : `Mute ${MUTE_DAYS}d`}
                   onClick={() =>
@@ -124,9 +122,7 @@ export function SubscriptionsList({ onCreate, onEdit }: SubscriptionsListProps) 
                       patch: { muted_until: muted ? null : muteUntilISO(MUTE_DAYS) },
                     })
                   }
-                >
-                  {muted ? '🔔' : '🔕'}
-                </InlineButtons.Item>
+                />
                 <InlineButtons.Item
                   mode="plain"
                   text={confirmingDelete === s.id ? 'Sure?' : 'Delete'}
@@ -138,9 +134,7 @@ export function SubscriptionsList({ onCreate, onEdit }: SubscriptionsListProps) 
                       setConfirmingDelete(s.id)
                     }
                   }}
-                >
-                  🗑
-                </InlineButtons.Item>
+                />
               </InlineButtons>
             </div>
           )

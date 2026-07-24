@@ -384,7 +384,15 @@ func TestAirportSearch(t *testing.T) {
 
 	rec = callRaw(t, h, "tma "+signedInitData(t, testBotToken, ownerID, time.Now()),
 		http.MethodGet, "/api/v1/airports?q=b", "")
-	if body := strings.TrimSpace(rec.Body.String()); body != "[]" {
-		t.Errorf("short query: body = %s, want []", body)
+	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil || len(results) == 0 {
+		t.Errorf("one-letter query must search: err=%v body=%s", err, rec.Body)
+	}
+
+	// Empty query serves the browse list (major hubs) so the picker has
+	// content before the user types.
+	rec = callRaw(t, h, "tma "+signedInitData(t, testBotToken, ownerID, time.Now()),
+		http.MethodGet, "/api/v1/airports?q=", "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil || len(results) == 0 {
+		t.Errorf("empty query must return the browse list: err=%v body=%s", err, rec.Body)
 	}
 }

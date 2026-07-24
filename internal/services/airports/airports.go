@@ -44,8 +44,9 @@ type indexed struct {
 
 // Service is the in-memory dataset. Immutable after New; safe for concurrent use.
 type Service struct {
-	byIATA map[string]Airport
-	all    []indexed
+	byIATA  map[string]Airport
+	all     []indexed
+	popular []Airport // large airports with scheduled service, city-alphabetical
 }
 
 // New parses the embedded dataset. Errors mean a broken embedded file — a
@@ -95,7 +96,31 @@ func New() (*Service, error) {
 			rank:     typeRank(a.Type),
 		})
 	}
+	for _, a := range svc.byIATA {
+		if a.Type == "large_airport" && a.Scheduled {
+			svc.popular = append(svc.popular, a)
+		}
+	}
+	sort.Slice(svc.popular, func(i, j int) bool {
+		a, b := svc.popular[i], svc.popular[j]
+		if a.City != b.City {
+			return a.City < b.City
+		}
+		return a.IATA < b.IATA
+	})
 	return svc, nil
+}
+
+// Popular returns up to limit major airports (large, with scheduled service)
+// in city-alphabetical order — the airport picker's browse list before the
+// user has typed anything.
+func (s *Service) Popular(limit int) []Airport {
+	if limit <= 0 || limit > len(s.popular) {
+		limit = len(s.popular)
+	}
+	out := make([]Airport, limit)
+	copy(out, s.popular[:limit])
+	return out
 }
 
 // Exists implements domain.AirportLookup.
@@ -136,11 +161,12 @@ const (
 )
 
 // Search returns up to limit airports for an autocomplete query. Matching is
-// case- and diacritic-insensitive ("timis" finds Timișoara). Queries shorter
-// than 2 characters return nil — one letter matches half the world.
+// case- and diacritic-insensitive ("timis" finds Timișoara) and starts from
+// the first character; an empty query returns nil (the picker's browse list
+// is Popular, not Search).
 func (s *Service) Search(query string, limit int) []Airport {
 	q := fold(strings.TrimSpace(query))
-	if len(q) < 2 || limit <= 0 {
+	if q == "" || limit <= 0 {
 		return nil
 	}
 	qUpper := strings.ToUpper(strings.TrimSpace(query))

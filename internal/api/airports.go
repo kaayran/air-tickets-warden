@@ -1,10 +1,19 @@
 package api
 
-import "net/http"
+import (
+	"net/http"
+	"strings"
+
+	"github.com/kaayran/air-tickets-warden/internal/services/airports"
+)
 
 // airportSearchLimit bounds an autocomplete response — a dropdown never shows
-// more anyway.
-const airportSearchLimit = 8
+// more anyway. The browse list (empty query) is longer: it is the only way to
+// scroll around before typing.
+const (
+	airportSearchLimit = 8
+	airportBrowseLimit = 20
+)
 
 type airportResponse struct {
 	IATA    string `json:"iata"`
@@ -14,9 +23,15 @@ type airportResponse struct {
 }
 
 // handleSearchAirports serves the airport picker: GET /api/v1/airports?q=belg.
-// Sub-2-character queries yield an empty list (mirrors the service rule).
+// An empty query returns the browse list (major hubs, city-alphabetical) so
+// the picker has content before the user types.
 func (a *API) handleSearchAirports(w http.ResponseWriter, r *http.Request) {
-	results := a.airports.Search(r.URL.Query().Get("q"), airportSearchLimit)
+	var results []airports.Airport
+	if q := strings.TrimSpace(r.URL.Query().Get("q")); q == "" {
+		results = a.airports.Popular(airportBrowseLimit)
+	} else {
+		results = a.airports.Search(q, airportSearchLimit)
+	}
 	resp := make([]airportResponse, len(results))
 	for i, ap := range results {
 		resp[i] = airportResponse{IATA: ap.IATA, Name: ap.Name, City: ap.City, Country: ap.Country}

@@ -26,15 +26,17 @@ export interface AirportPickerProps {
 }
 
 // AirportPicker is the IATA autocomplete: selected codes render as removable
-// chips; typing 2+ characters searches /api/v1/airports.
+// chips. On focus with an empty field it shows the browse list (major hubs,
+// city-alphabetical); searching starts from the first character.
 export function AirportPicker({ header, placeholder, selected, max, exclude = [], error, onChange }: AirportPickerProps) {
   const [query, setQuery] = useState('')
+  const [focused, setFocused] = useState(false)
   const debouncedQuery = useDebounced(query.trim(), 250)
 
   const { data: hits } = useQuery({
     queryKey: ['airports', debouncedQuery],
-    queryFn: () => searchAirports(debouncedQuery),
-    enabled: debouncedQuery.length >= 2,
+    queryFn: () => searchAirports(debouncedQuery), // '' -> the browse list
+    enabled: focused,
     staleTime: 5 * 60 * 1000, // the dataset is static; cache generously
   })
 
@@ -46,7 +48,7 @@ export function AirportPicker({ header, placeholder, selected, max, exclude = []
       {selected.length > 0 && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '8px 16px' }}>
           {selected.map((code) => (
-            <Chip key={code} mode="mono" after="✕" onClick={() => onChange(selected.filter((c) => c !== code))}>
+            <Chip key={code} mode="mono" after="×" onClick={() => onChange(selected.filter((c) => c !== code))}>
               {code}
             </Chip>
           ))}
@@ -60,10 +62,13 @@ export function AirportPicker({ header, placeholder, selected, max, exclude = []
           autoCapitalize="none"
           autoCorrect="off"
           onChange={(e) => setQuery(e.target.value)}
+          onFocus={() => setFocused(true)}
+          // Delay so a tap on a suggestion row lands before the list hides.
+          onBlur={() => setTimeout(() => setFocused(false), 150)}
         />
       )}
       {!atCapacity &&
-        query.trim().length >= 2 &&
+        focused &&
         suggestions.map((h) => (
           <Cell
             key={h.iata}

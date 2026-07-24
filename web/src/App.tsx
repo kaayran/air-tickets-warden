@@ -32,12 +32,16 @@ export default function App() {
         )}
       </div>
       <Tabbar>
-        <Tabbar.Item text="Subscriptions" selected={route.screen === 'list'} onClick={() => setRoute({ screen: 'list' })}>
-          ✈️
-        </Tabbar.Item>
-        <Tabbar.Item text="Settings" selected={route.screen === 'settings'} onClick={() => setRoute({ screen: 'settings' })}>
-          ⚙️
-        </Tabbar.Item>
+        <Tabbar.Item
+          text="Subscriptions"
+          selected={route.screen === 'list'}
+          onClick={() => setRoute({ screen: 'list' })}
+        />
+        <Tabbar.Item
+          text="Settings"
+          selected={route.screen === 'settings'}
+          onClick={() => setRoute({ screen: 'settings' })}
+        />
       </Tabbar>
     </>
   )
