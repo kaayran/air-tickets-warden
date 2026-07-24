@@ -1,45 +1,44 @@
-import { useQuery } from '@tanstack/react-query'
-import { Cell, List, Placeholder, Section, Spinner } from '@telegram-apps/telegram-ui'
-import { fetchMe } from './api'
+import { useState } from 'react'
+import { Tabbar } from '@telegram-apps/telegram-ui'
+import { type Subscription } from './api'
+import { SettingsScreen } from './screens/SettingsScreen'
+import { SubscriptionForm } from './screens/SubscriptionForm'
+import { SubscriptionsList } from './screens/SubscriptionsList'
 
-// App is the Phase 0 walking-skeleton shell: it authenticates via Telegram
-// initData and renders the caller's settings from GET /api/v1/me. Real
-// subscription screens arrive in Phase 1.
+type Route =
+  | { screen: 'list' }
+  | { screen: 'form'; sub?: Subscription }
+  | { screen: 'settings' }
+
+// App is the Phase 1 Mini App: subscriptions list + create/edit form +
+// settings, navigated with local state (three screens don't need a router).
 export default function App() {
-  const { data, error, isLoading } = useQuery({
-    queryKey: ['me'],
-    queryFn: fetchMe,
-    retry: false,
-  })
+  const [route, setRoute] = useState<Route>({ screen: 'list' })
 
-  if (isLoading) {
-    return (
-      <Placeholder>
-        <Spinner size="l" />
-      </Placeholder>
-    )
-  }
-
-  if (error || !data) {
-    return (
-      <Placeholder
-        header="Could not load your data"
-        description={error instanceof Error ? error.message : 'Unknown error'}
-      />
-    )
+  if (route.screen === 'form') {
+    return <SubscriptionForm initial={route.sub} onDone={() => setRoute({ screen: 'list' })} />
   }
 
   return (
-    <List>
-      <Section
-        header="Air Tickets Warden"
-        footer="Phase 0 shell — data from GET /api/v1/me"
-      >
-        <Cell subtitle="Chat ID">{data.chat_id}</Cell>
-        <Cell subtitle="Cooldown hours">{data.cooldown_hours ?? '—'}</Cell>
-        <Cell subtitle="Drop %">{data.drop_pct ?? '—'}</Cell>
-        <Cell subtitle="Stable price band %">{data.stable_price_band_pct ?? '—'}</Cell>
-      </Section>
-    </List>
+    <>
+      <div style={{ paddingBottom: 84 }}>
+        {route.screen === 'list' ? (
+          <SubscriptionsList
+            onCreate={() => setRoute({ screen: 'form' })}
+            onEdit={(sub) => setRoute({ screen: 'form', sub })}
+          />
+        ) : (
+          <SettingsScreen />
+        )}
+      </div>
+      <Tabbar>
+        <Tabbar.Item text="Subscriptions" selected={route.screen === 'list'} onClick={() => setRoute({ screen: 'list' })}>
+          ✈️
+        </Tabbar.Item>
+        <Tabbar.Item text="Settings" selected={route.screen === 'settings'} onClick={() => setRoute({ screen: 'settings' })}>
+          ⚙️
+        </Tabbar.Item>
+      </Tabbar>
+    </>
   )
 }
