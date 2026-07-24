@@ -9,10 +9,11 @@ How to run Air Tickets Warden locally and test the Mini App on your phone.
 | Go 1.24+ | the service binary | `brew install go` |
 | Node 20+ | Vite build of the Mini App | `brew install node` |
 | Docker | local Postgres (compose) | Docker Desktop |
-| `sqlc` | regenerate typed queries | `brew install sqlc` |
 | `cloudflared` | HTTPS tunnel so Telegram can reach the local app | `brew install cloudflared` |
 
 `goose` is used as a **library** (migrations embedded via `go:embed`), so no CLI is needed.
+`sqlc` needs no install either: `make sqlc` runs a pinned version via `go run`
+(`SQLC_VERSION` in the Makefile — the same pin CI uses for the drift check).
 
 ## Environment
 
@@ -43,7 +44,8 @@ The bot uses **long polling**, so it needs no tunnel — only the Mini App does.
 make dev        # = scripts/dev.sh
 ```
 
-This starts Postgres, builds `web/dist` if missing, opens a cloudflared quick tunnel, and runs
+This starts Postgres, rebuilds `web/dist` (always — so the phone never sees a stale
+frontend), opens a cloudflared quick tunnel, and runs
 the app with `PUBLIC_URL` set to the tunnel URL. Then in Telegram:
 
 1. Open your bot, send `/start`.
@@ -97,11 +99,17 @@ Caddy serves `localhost` with an internal self-signed cert by default; set `WARD
 real hostname in prod for automatic Let's Encrypt. The multi-stage `Dockerfile` builds the Mini
 App (node) then the Go binary (with `web/dist` embedded) into a distroless image.
 
-## Postgres MCP (read-only, AI dev tooling)
+Note: with the defaults (`PUBLIC_URL=https://localhost`) the bot's button opens a URL your
+phone cannot reach — the compose stack is only phone-testable with a real domain
+(`WARDEN_DOMAIN` + `PUBLIC_URL`). For phone testing in dev, use `make dev`.
 
-A checked-in `.mcp.json` registers a Postgres MCP server so the AI coding assistant can inspect
-the **dev** schema and data read-only. **Local dev only — never production, never shipped in the
-image** (`.mcp.json` is in `.dockerignore`).
+## Read-only DB access for the AI assistant
+
+The AI coding assistant inspects the **dev** schema and data through plain `psql` under a
+`SELECT`-only role — the security boundary is the role's server-side grants, no extra
+tooling needed. (An MCP server was considered and dropped: the reference
+`@modelcontextprotocol/server-postgres` package is archived, and `psql` does the same job.)
+**Local dev only — never production.**
 
 One-time role setup against the dev database (the compose Postgres):
 
@@ -113,6 +121,12 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO warden_ro;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO warden_ro;
 ```
 
-Then set `WARDEN_MCP_DATABASE_URL` (see `.env.example`) — `.mcp.json` reads the connection
-string from that env var, so no credentials live in git. Schema changes always go through goose
-migrations under review, never through the MCP connection.
+Query path (works without psql on the host — uses the container's local socket):
+
+```sh
+docker compose exec postgres psql -U warden_ro -d warden -c '\d'
+```
+
+With psql installed on the host, `psql "$WARDEN_RO_DATABASE_URL"` works too (see
+`.env.example`). Schema changes always go through goose migrations under review, never
+through this connection.

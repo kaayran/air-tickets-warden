@@ -65,10 +65,18 @@ func (s *Server) spaHandler() http.Handler {
 			http.Error(w, "frontend unavailable", http.StatusInternalServerError)
 		})
 	}
+	if _, err := fs.Stat(dist, "index.html"); err != nil {
+		s.log.Warn("mini app not built; serving notice", "err", err)
+	}
+	return spaHandlerFor(dist)
+}
 
+// spaHandlerFor implements the SPA serving logic over any filesystem — split
+// from spaHandler so tests can exercise it with an fstest.MapFS instead of the
+// build-dependent embedded dist.
+func spaHandlerFor(dist fs.FS) http.Handler {
 	index, err := fs.ReadFile(dist, "index.html")
 	if err != nil {
-		s.log.Warn("mini app not built; serving notice", "err", err)
 		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "Mini App not built. Run `make web-build`.", http.StatusServiceUnavailable)
 		})
@@ -95,36 +103,58 @@ func serveIndex(w http.ResponseWriter, index []byte) {
 	_, _ = w.Write(index)
 }
 
-// MetricsHandler serves Prometheus /metrics on a separate (non-public) port so
-// metrics are not exposed through the public ingress.
+// MetricsHandler serves the internal (non-public) port: Prometheus /metrics
+// and the detailed /health with per-check errors. The public /health carries no
+// dependency details — those would leak host/user names to anyone with the URL.
 func (s *Server) MetricsHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", promhttp.HandlerFor(s.reg, promhttp.HandlerOpts{}))
+	mux.HandleFunc("GET /health", s.handleHealthDetailed)
 	return mux
 }
 
-// handleHealth returns 200 when every registered check passes, otherwise 503
-// with a per-check status body.
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	results := make(map[string]string, len(s.checks))
-	ok := true
+// runChecks executes every registered readiness probe, logging failures so a
+// broken dependency is visible in logs regardless of who polls which endpoint.
+func (s *Server) runChecks(ctx context.Context) (results map[string]string, ok bool) {
+	results = make(map[string]string, len(s.checks))
+	ok = true
 	for _, c := range s.checks {
-		if err := c.Check(r.Context()); err != nil {
+		if err := c.Check(ctx); err != nil {
 			ok = false
 			results[c.Name] = err.Error()
+			s.log.Warn("health check failed", "check", c.Name, "err", err)
 			continue
 		}
 		results[c.Name] = "ok"
 	}
+	return results, ok
+}
 
+// handleHealth is the public probe (uptime monitoring, deploy smoke tests):
+// status only, no dependency details.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	_, ok := s.runChecks(r.Context())
+	writeHealth(w, ok, nil)
+}
+
+// handleHealthDetailed is the internal-port variant with per-check results.
+func (s *Server) handleHealthDetailed(w http.ResponseWriter, r *http.Request) {
+	results, ok := s.runChecks(r.Context())
+	writeHealth(w, ok, results)
+}
+
+func writeHealth(w http.ResponseWriter, ok bool, checks map[string]string) {
 	status := http.StatusOK
 	if !ok {
 		status = http.StatusServiceUnavailable
 	}
+	body := map[string]any{
+		"status": map[bool]string{true: "ok", false: "unavailable"}[ok],
+	}
+	if checks != nil {
+		body["checks"] = checks
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status": map[bool]string{true: "ok", false: "unavailable"}[ok],
-		"checks": results,
-	})
+	_ = json.NewEncoder(w).Encode(body)
 }

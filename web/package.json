@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build && touch dist/.gitkeep",
     "preview": "vite preview",
-    "lint": "tsc --noEmit"
+    "lint": "eslint ."
   },
   "keywords": [],
   "author": "",
@@ -22,10 +22,15 @@
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.4",
-    "typescript": "^7.0.2",
+    "eslint": "^10.7.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.7.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.65.0",
     "vite": "^8.1.5",
     "vitest": "^4.1.10"
   }

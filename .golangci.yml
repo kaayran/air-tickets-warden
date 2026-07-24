@@ -1,0 +1,10 @@
+# Deliberately minimal: the golangci-lint v2 "standard" set (errcheck, govet,
+# ineffassign, staticcheck, unused). Grow it consciously, not by upgrading.
+version: "2"
+
+linters:
+  default: standard
+  exclusions:
+    paths:
+      # Some npm packages ship .go files; they are not our code.
+      - web/node_modules

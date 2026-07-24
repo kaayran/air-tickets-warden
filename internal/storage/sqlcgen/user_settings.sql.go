@@ -51,27 +51,35 @@ const updateUserSettings = `-- name: UpdateUserSettings :one
 INSERT INTO user_settings (chat_id, cooldown_hours, drop_pct, stable_price_band_pct, updated_at)
 VALUES ($1, $2, $3, $4, now())
 ON CONFLICT (chat_id) DO UPDATE SET
-    cooldown_hours        = EXCLUDED.cooldown_hours,
-    drop_pct              = EXCLUDED.drop_pct,
-    stable_price_band_pct = EXCLUDED.stable_price_band_pct,
+    cooldown_hours        = CASE WHEN $5::bool THEN excluded.cooldown_hours ELSE user_settings.cooldown_hours END,
+    drop_pct              = CASE WHEN $6::bool THEN excluded.drop_pct ELSE user_settings.drop_pct END,
+    stable_price_band_pct = CASE WHEN $7::bool THEN excluded.stable_price_band_pct ELSE user_settings.stable_price_band_pct END,
     updated_at            = now()
 RETURNING chat_id, cooldown_hours, drop_pct, stable_price_band_pct, updated_at
 `
 
 type UpdateUserSettingsParams struct {
-	ChatID             int64    `json:"chat_id"`
-	CooldownHours      *int32   `json:"cooldown_hours"`
-	DropPct            *float64 `json:"drop_pct"`
-	StablePriceBandPct *float64 `json:"stable_price_band_pct"`
+	ChatID                int64    `json:"chat_id"`
+	CooldownHours         *int32   `json:"cooldown_hours"`
+	DropPct               *float64 `json:"drop_pct"`
+	StablePriceBandPct    *float64 `json:"stable_price_band_pct"`
+	SetCooldownHours      bool     `json:"set_cooldown_hours"`
+	SetDropPct            bool     `json:"set_drop_pct"`
+	SetStablePriceBandPct bool     `json:"set_stable_price_band_pct"`
 }
 
-// PATCH /api/v1/me — overwrites the mutable settings columns.
+// PATCH /api/v1/me — true PATCH semantics: each column is written only when its
+// set_* flag is true (JSON key present); a true flag with a NULL value clears
+// the column back to the cascade default. Flags false → column untouched.
 func (q *Queries) UpdateUserSettings(ctx context.Context, arg UpdateUserSettingsParams) (UserSetting, error) {
 	row := q.db.QueryRow(ctx, updateUserSettings,
 		arg.ChatID,
 		arg.CooldownHours,
 		arg.DropPct,
 		arg.StablePriceBandPct,
+		arg.SetCooldownHours,
+		arg.SetDropPct,
+		arg.SetStablePriceBandPct,
 	)
 	var i UserSetting
 	err := row.Scan(

@@ -7,5 +7,4 @@ bin
 docs
 .env
 .env.example
-.mcp.json
 scripts

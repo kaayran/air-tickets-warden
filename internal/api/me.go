@@ -42,15 +42,16 @@ func (a *API) handleGetMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toMeResponse(settings))
 }
 
-// mePatchRequest is the PATCH body. Each field replaces the stored value; an
-// omitted field clears it (Phase 0 semantics — refined later if needed).
+// mePatchRequest is the PATCH body. True PATCH semantics via Optional: an
+// absent key leaves the stored value untouched, an explicit null clears it
+// back to the cascade default (user_settings → env).
 type mePatchRequest struct {
-	CooldownHours      *int32   `json:"cooldown_hours"`
-	DropPct            *float64 `json:"drop_pct"`
-	StablePriceBandPct *float64 `json:"stable_price_band_pct"`
+	CooldownHours      Optional[int32]   `json:"cooldown_hours"`
+	DropPct            Optional[float64] `json:"drop_pct"`
+	StablePriceBandPct Optional[float64] `json:"stable_price_band_pct"`
 }
 
-// handlePatchMe upserts the caller's settings.
+// handlePatchMe applies the caller's partial settings update.
 func (a *API) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 	chatID, ok := chatIDFromContext(r.Context())
 	if !ok {
@@ -63,10 +64,13 @@ func (a *API) handlePatchMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	settings, err := a.store.Queries.UpdateUserSettings(r.Context(), sqlcgen.UpdateUserSettingsParams{
-		ChatID:             chatID,
-		CooldownHours:      body.CooldownHours,
-		DropPct:            body.DropPct,
-		StablePriceBandPct: body.StablePriceBandPct,
+		ChatID:                chatID,
+		CooldownHours:         body.CooldownHours.Value,
+		SetCooldownHours:      body.CooldownHours.Set,
+		DropPct:               body.DropPct.Value,
+		SetDropPct:            body.DropPct.Set,
+		StablePriceBandPct:    body.StablePriceBandPct.Value,
+		SetStablePriceBandPct: body.StablePriceBandPct.Set,
 	})
 	if err != nil {
 		a.log.Error("update user settings", "err", err, "chat_id", chatID)

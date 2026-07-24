@@ -33,11 +33,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
-      - name: Install sqlc
-        run: go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
+      # `make sqlc` pins the sqlc version (SQLC_VERSION in the Makefile), so CI
+      # and local generation can never disagree.
       - name: Regenerate and check for drift
         run: |
-          sqlc generate
+          make sqlc
           git diff --exit-code -- internal/storage/sqlcgen \
             || (echo "::error::sqlc output is stale — run 'make sqlc' and commit" && exit 1)
 
@@ -49,9 +49,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          # Pinned (matches local dev) so a new golangci release can never
+          # redden CI without a commit here.
+          version: v2.12.2
 
   web:
     name: Web build & test
@@ -67,6 +69,7 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
+      - run: npm run lint
       - run: npm run build
       - run: npm test
 

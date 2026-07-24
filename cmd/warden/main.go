@@ -98,10 +98,16 @@ func run() error {
 	apiHandler := api.New(store, cfg.Telegram.BotToken, cfg.Telegram.AllowedUserIDs, log).Handler()
 	srv := web.New(log, reg).WithHealthCheck("database", store.Ping)
 
-	// Root mux: /api/v1/* → API (initData auth); everything else → app (health,
-	// and the embedded SPA from step 4).
+	// Root mux: /api/v1/* → API (initData auth); other /api/* → JSON 404 (not
+	// the SPA fallback, which would answer HTML with a 200 to a typoed API
+	// path); everything else → app (health + embedded SPA).
 	root := http.NewServeMux()
 	root.Handle("/api/v1/", apiHandler)
+	root.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"not found"}` + "\n"))
+	})
 	root.Handle("/", srv.Handler())
 
 	appServer := &http.Server{

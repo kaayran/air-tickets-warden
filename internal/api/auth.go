@@ -14,8 +14,12 @@ import (
 //	Authorization: tma <initData>
 const authScheme = "tma"
 
-// initDataMaxAge bounds how stale an initData string may be (replay protection).
-const initDataMaxAge = 24 * time.Hour
+// initDataMaxAge bounds how stale an initData string may be (replay
+// protection). initData is minted fresh on every Mini App open and Telegram
+// never refreshes it mid-session, so this must cover one realistic session —
+// an hour is generous for this app; the client tells expired sessions to
+// reopen the app.
+const initDataMaxAge = 1 * time.Hour
 
 type ctxKey int
 

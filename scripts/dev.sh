@@ -12,10 +12,10 @@ cd "$(dirname "$0")/.."
 echo "==> Starting Postgres"
 docker compose up -d postgres >/dev/null
 
+# Always rebuild: a stale dist on a phone test is a debugging trap, and the
+# Vite build of this shell takes seconds.
 echo "==> Building Mini App (web/dist)"
-if [ ! -f web/dist/index.html ]; then
-  (cd web && npm run build)
-fi
+(cd web && npm run build)
 
 echo "==> Opening cloudflared quick tunnel"
 TUNNEL_LOG="$(mktemp)"

@@ -35,7 +35,7 @@ func New(token, publicURL string, allowedUserIDs []int64, log *slog.Logger) (*Bo
 	b := &Bot{log: log, publicURL: publicURL, allowed: allowed}
 
 	opts := []bot.Option{
-		bot.WithMiddlewares(b.whitelistMiddleware),
+		bot.WithMiddlewares(b.recoverMiddleware, b.whitelistMiddleware),
 		bot.WithDefaultHandler(b.handleHelp),
 	}
 	api, err := bot.New(token, opts...)
@@ -80,20 +80,31 @@ func (b *Bot) send(ctx context.Context, api *bot.Bot, params *bot.SendMessagePar
 	}
 }
 
-// whitelistMiddleware rejects any update whose sender is not on the whitelist,
-// before it reaches a handler.
+// recoverMiddleware is the outermost guard: a panic in any handler is logged
+// instead of taking down the whole process with it.
+func (b *Bot) recoverMiddleware(next bot.HandlerFunc) bot.HandlerFunc {
+	return func(ctx context.Context, api *bot.Bot, update *models.Update) {
+		defer func() {
+			if r := recover(); r != nil {
+				b.log.Error("panic while handling update", "recover", r, "update_id", update.ID)
+			}
+		}()
+		next(ctx, api, update)
+	}
+}
+
+// whitelistMiddleware silently drops any update whose sender is not on the
+// whitelist. Deliberately no reply: answering would confirm to strangers that
+// the bot is alive and let them trigger outbound API calls. The Warn log is
+// also how a new user's id is discovered before adding it to ALLOWED_USER_IDS.
 func (b *Bot) whitelistMiddleware(next bot.HandlerFunc) bot.HandlerFunc {
 	return func(ctx context.Context, api *bot.Bot, update *models.Update) {
-		id, chatID, ok := senderAndChat(update)
+		id, _, ok := senderAndChat(update)
 		if !ok {
 			return // updates without an identifiable sender are ignored
 		}
 		if _, allowed := b.allowed[id]; !allowed {
 			b.log.Warn("rejected non-whitelisted user", "user_id", id)
-			b.send(ctx, api, &bot.SendMessageParams{
-				ChatID: chatID,
-				Text:   "You are not authorized to use this bot.",
-			})
 			return
 		}
 		next(ctx, api, update)
@@ -132,7 +143,21 @@ func senderAndChat(u *models.Update) (userID, chatID int64, ok bool) {
 	case u.Message != nil && u.Message.From != nil:
 		return u.Message.From.ID, u.Message.Chat.ID, true
 	case u.CallbackQuery != nil:
-		return u.CallbackQuery.From.ID, u.CallbackQuery.Message.Message.Chat.ID, true
+		// CallbackQuery.Message is MaybeInaccessibleMessage: .Message is nil
+		// when the source message is older than 48h (Telegram sends an
+		// InaccessibleMessage instead) or when the callback comes from an
+		// inline-mode message (no chat at all).
+		cq := u.CallbackQuery
+		switch {
+		case cq.Message.Message != nil:
+			return cq.From.ID, cq.Message.Message.Chat.ID, true
+		case cq.Message.InaccessibleMessage != nil:
+			return cq.From.ID, cq.Message.InaccessibleMessage.Chat.ID, true
+		default:
+			// Inline-mode callback: no chat, but in this private bot the
+			// user's private chat id equals their user id.
+			return cq.From.ID, cq.From.ID, true
+		}
 	default:
 		return 0, 0, false
 	}

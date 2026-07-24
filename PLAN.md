@@ -13,21 +13,21 @@ Goal: an empty but production-shaped service: Go binary serving an embedded Reac
 1. **Module & layout.** `go mod init`, package tree from §10.5 (incl. `internal/api`, `internal/web`); `web/` scaffold via Vite (React + TS template + `@telegram-apps/sdk-react` + `telegram-ui`). `Makefile`: `run`, `test`, `lint`, `fmt`, `migrate`, `sqlc`, `web-build`, `docker`, `tunnel`.
 2. **Config.** `internal/config`: `caarlos0/env` + `godotenv`, startup validation, secret redaction, `PUBLIC_URL`, per-source budgets.
 3. **Telemetry.** slog JSON, Prometheus registry, Sentry (no-op on empty DSN).
-4. **Storage bootstrap.** pgxpool, goose runner with embedded `db/migrations`, migration `0001` (`subscriptions` with `next_check_at`, `muted_until`; `user_settings`), `sqlc.yaml`, `warden migrate` subcommand.
+4. **Storage bootstrap.** pgxpool, goose runner with embedded `db/migrations`, migration `0001` (**`user_settings` only** — the `subscriptions` schema is deliberately deferred to Phase 1 so it is derived from the domain types, not sketched ahead of them), `sqlc.yaml`. Migrations apply automatically on `warden run` startup (single-instance service; a deploy that comes up healthy has migrated); the `warden migrate` subcommand exists for manual/ad-hoc runs.
 5. **Web server.** `internal/web`: serves embedded `web/dist` (SPA fallback to `index.html`), `/health`, `/metrics`; `internal/api`: `/api/v1` mux + initData auth middleware (validate HMAC, check `auth_date`, extract user, enforce whitelist) + `GET/PATCH /api/v1/me` over `user_settings` (lazy row creation).
 6. **Bot shell.** Long-polling, whitelist middleware, `/start` with `web_app` button → `PUBLIC_URL`, `/help`; menu button configured via `setChatMenuButton` at startup.
 7. **Dev loop.** Vite dev server proxying `/api` to the Go server; cloudflared/ngrok tunnel target documented in README (Telegram must reach a HTTPS URL to open the Mini App).
 8. **Lifecycle.** `signal.NotifyContext`, ordered graceful shutdown (bot → HTTP server → in-flight work → pool → Sentry flush).
 9. **Docker & CI.** Multi-stage Dockerfile (node → go → distroless), compose: app + `postgres:16-alpine` + Caddy (Caddyfile with the chosen domain); `ci.yml`: golangci-lint, `go vet`, `go test -short`, `npm lint/test/build`, sqlc drift check, image build.
-10. **Dev tooling — Postgres MCP** (see design §10.6). Provision a `SELECT`-only `warden_ro` role against the *dev* database; add a checked-in `.mcp.json` at the repo root registering a Postgres MCP server (`@modelcontextprotocol/server-postgres`) whose connection string resolves from `WARDEN_MCP_DATABASE_URL` (env only, no secrets in git — add the var to `.env.example`). Document the one-time role setup in the README. This gives the AI coding assistant read-only access to the schema and data for the rest of the build. **Local dev only — never production, never shipped in the image.**
+10. **Dev tooling — read-only DB access for the AI assistant** (see design §10.6). Provision a `SELECT`-only `warden_ro` role against the *dev* database; the assistant queries via plain `psql` (`docker compose exec postgres psql -U warden_ro -d warden`, or `psql "$WARDEN_RO_DATABASE_URL"` from the host — var in `.env.example`, no secrets in git). The security boundary is the role's server-side grants. No MCP server: the reference `@modelcontextprotocol/server-postgres` package is archived, and psql provides the same capability with zero extra dependencies. Document the one-time role setup in docs. **Local dev only — never production.**
 
-**Exit criteria:** `docker compose up` → Mini App shell opens from the bot's button and shows data from `/api/v1/me`; non-whitelisted users are rejected in both bot and API; CI green; the AI assistant can query the dev DB read-only through the registered MCP server.
+**Exit criteria:** `docker compose up` → Mini App shell opens from the bot's button and shows data from `/api/v1/me` (with a real `WARDEN_DOMAIN`/`PUBLIC_URL`; in dev, `make dev` is the phone-testable path); non-whitelisted users are rejected in both bot and API (the bot silently drops them); CI green; the AI assistant can query the dev DB read-only via psql under the `warden_ro` role.
 
 ## Phase 1 — Subscriptions: API + Mini App CRUD
 
 Goal: full subscription lifecycle through the Mini App, stored in Postgres.
 
-1. **Domain.** `internal/domain`: `Subscription`, validation rules (IATA against dataset, date ranges, enums), status enum, settings cascade (subscription → `user_settings` → env). Pure package.
+1. **Domain.** `internal/domain`: `Subscription`, validation rules (IATA against dataset, date ranges, enums), status enum, settings cascade (subscription → `user_settings` → env). Pure package. Then migration `0002` creates the `subscriptions` table **derived from the domain types** (schema follows domain, never the other way around); money columns are `bigint` EUR minor units (e.g. `max_price_minor`) — never `numeric`/float, mirroring `PriceMinor int64`.
 2. **Airports service.** `go:embed` OurAirports CSV; lookup by IATA, prefix/city search, TZ resolution. Unit tests.
 3. **Subscription Manager.** sqlc-backed CRUD, scoped by `user_chat_id`.
 4. **API.** `GET/POST /subscriptions`, `GET/PATCH/DELETE /subscriptions/{id}` (PATCH covers pause/resume/mute via `muted_until`), `GET /airports?q=`. Handler tests with signed initData fixtures (valid / expired / tampered / foreign object).
@@ -103,7 +103,7 @@ Goal: the bot monitors autonomously and delivers real alerts to Telegram.
 - Every phase merges to `master` green (lint + tests + build, Go and web).
 - Migrations are append-only from the first deploy.
 - Adapter fixtures are recorded from real responses and committed; schema drift must break contract tests.
-- No `float64` money anywhere in domain logic — integer minor units (`PriceMinor int64`).
+- No `float64` money anywhere in domain logic — integer minor units (`PriceMinor int64`). The same rule holds in the schema and API: money columns are `bigint` minor units in EUR (never `numeric`/float), JSON money fields are integers. Dimensionless ratios (`drop_pct`) may be floats — they are not money.
 - Only live sources may trigger alerts; trend-only sources feed history exclusively.
 - New external calls always get: context deadline, rate limiter, daily budget check, retry policy, `api_call_log` write, metrics.
 - API identity comes only from validated initData; every mutation checks ownership. The Mini App validates for UX; the server validates for real.

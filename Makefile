@@ -1,5 +1,9 @@
 .DEFAULT_GOAL := help
 
+# Single source of truth for the sqlc version — CI runs `make sqlc`, so the
+# drift check can never disagree with local generation.
+SQLC_VERSION := v1.31.1
+
 .PHONY: help run dev test lint fmt migrate sqlc web-build docker tunnel db-up db-down
 
 help: ## List targets
@@ -27,7 +31,7 @@ migrate: ## Apply DB migrations
 	go run ./cmd/warden migrate
 
 sqlc: ## Regenerate typed queries from db/queries
-	sqlc generate
+	go run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION) generate
 
 web-build: ## Build the Mini App into web/dist (embedded by the binary)
 	cd web && npm ci && npm run build
