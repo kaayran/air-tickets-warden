@@ -63,3 +63,7 @@ web/dist/*
 *.dump
 *.sql.gz
 data/
+
+# The embedded airports dataset is source, not a local DB dump
+!internal/services/airports/data/
+!internal/services/airports/data/airports.csv
