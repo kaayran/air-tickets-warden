@@ -65,7 +65,7 @@ type Subscription struct {
 	OriginAlternatives []string // optional alternative departure airports
 	Destinations       []string // one or more IATA codes (e.g. BCN, MAD, VLC)
 
-	DateFrom       time.Time  // allowed departure date range (inclusive)
+	DateFrom       time.Time // allowed departure date range (inclusive)
 	DateTo         time.Time
 	ReturnDateFrom *time.Time // both set → round-trip with a return window
 	ReturnDateTo   *time.Time

@@ -17,10 +17,13 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	_ "time/tzdata" // airport TZ resolution must work in the distroless image
 
 	"github.com/kaayran/air-tickets-warden/internal/api"
 	"github.com/kaayran/air-tickets-warden/internal/bot"
 	"github.com/kaayran/air-tickets-warden/internal/config"
+	"github.com/kaayran/air-tickets-warden/internal/services/airports"
+	"github.com/kaayran/air-tickets-warden/internal/services/subscriptions"
 	"github.com/kaayran/air-tickets-warden/internal/storage"
 	"github.com/kaayran/air-tickets-warden/internal/telemetry"
 	"github.com/kaayran/air-tickets-warden/internal/web"
@@ -95,7 +98,12 @@ func run() error {
 		tgBot.Start(botCtx)
 	}()
 
-	apiHandler := api.New(store, cfg.Telegram.BotToken, cfg.Telegram.AllowedUserIDs, log).Handler()
+	airportsSvc, err := airports.New()
+	if err != nil {
+		return err
+	}
+	subsManager := subscriptions.New(store.Queries)
+	apiHandler := api.New(store, subsManager, airportsSvc, cfg.Telegram.BotToken, cfg.Telegram.AllowedUserIDs, log).Handler()
 	srv := web.New(log, reg).WithHealthCheck("database", store.Ping)
 
 	// Root mux: /api/v1/* → API (initData auth); other /api/* → JSON 404 (not
