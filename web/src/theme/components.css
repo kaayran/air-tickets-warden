@@ -264,15 +264,17 @@
 .tag--muted { color: var(--ink-muted); }
 .tag--triggered { color: var(--chart-magenta); }
 
-/* Row actions on a callout. */
+/* Row actions on a callout — a 2x2 grid so labels never overflow the callout
+   or reflow when a label changes (Pause/Resume, Mute/Unmute). */
 .row-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: var(--sp-2);
   margin-top: var(--sp-3);
   padding-top: var(--sp-3);
   border-top: var(--hair) solid var(--rule);
 }
-.row-actions .btn { flex: 1; }
+.row-actions .btn { min-width: 0; }
 
 /* Bottom navigation — a chart rule bar. */
 .tabbar {
@@ -421,10 +423,6 @@
   cursor: grab;
 }
 .tension__lever:active { cursor: grabbing; }
-.tension__threshold {
-  position: absolute; top: 0; bottom: 0; right: 56px;
-  width: 2px; background: var(--chart-magenta); opacity: 0.4;
-}
 
 /* Empty state — an unfiled chart. */
 .empty { text-align: center; padding: var(--sp-7) var(--sp-4); }

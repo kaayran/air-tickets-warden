@@ -42,7 +42,6 @@ export function TensionDelete({ onConfirm, onCancel }: { onConfirm: () => void; 
     <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
       <div ref={trackRef} className="tension">
         <div className="tension__fill" style={{ transform: `scaleX(${fillScale})` }} />
-        <span className="tension__threshold" />
         <span className="tension__label">{past ? 'RELEASE TO DELETE' : 'DRAG TO DELETE'}</span>
         {/* Move/up handlers live on the lever, which holds the pointer capture,
             so the drag keeps tracking even when the pointer leaves the track. */}
