@@ -1,24 +1,14 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import {
-  Banner,
-  Button,
-  Cell,
-  Checkbox,
-  FixedLayout,
-  Input,
-  List,
-  Section,
-  Select,
-  Steps,
-  Switch,
-} from '@telegram-apps/telegram-ui'
 import { ApiError, createSubscription, patchSubscription, type Subscription } from '../api'
 import { AirportPicker } from '../components/AirportPicker'
 import { PriceStepper } from '../components/PriceStepper'
+import { Button, Field, FieldGroup, SectionLabel, ToggleRow } from '../components/chart/ui'
+import { RouteLine } from '../components/chart/RouteLine'
 import { formatDateRange } from '../lib/format'
 import {
   addDays,
+  applyServerErrors,
   emptyForm,
   firstInvalidStep,
   fromSubscription,
@@ -33,31 +23,35 @@ import {
   type WizardStep,
 } from '../lib/subscriptionForm'
 
+const STEP_NAMES: Record<WizardStep, string> = {
+  from: 'Departure',
+  to: 'Destination',
+  dates: 'Dates',
+  alert: 'Alert',
+  summary: 'Confirm',
+}
+
 export interface SubscriptionFormProps {
-  /** Present when editing; absent when creating. */
-  initial?: Subscription
+  /** Present when editing an existing watch. */
+  edit?: Subscription
+  /** Present when duplicating: seed the fields but create a new watch. */
+  seed?: Subscription
   onDone: () => void
 }
 
-// SubscriptionForm is a five-page wizard: From, To, Dates, Alert, and a
-// summary with the final confirm. Each page validates only its own fields on
-// "Next"; the server stays the authority and its field errors surface on the
-// summary. On edit, only changed fields are PATCHed — fields the wizard does
-// not expose are never clobbered.
-export function SubscriptionForm({ initial, onDone }: SubscriptionFormProps) {
+// SubscriptionForm is the flight-plan wizard: Departure, Destination, Dates,
+// Alert, and a Confirm page. Each page validates only its own fields on Next;
+// server field errors map back onto the inputs and jump to the offending step.
+// It creates, edits (edit), or duplicates (seed) a watch.
+export function SubscriptionForm({ edit, seed, onDone }: SubscriptionFormProps) {
   const queryClient = useQueryClient()
-  const [values, setValues] = useState<SubscriptionFormValues>(
-    initial ? fromSubscription(initial) : emptyForm,
-  )
+  const source = edit ?? seed
+  const [values, setValues] = useState<SubscriptionFormValues>(source ? fromSubscription(source) : emptyForm)
   const [step, setStep] = useState<WizardStep>('from')
   const [errors, setErrors] = useState<FormErrors>({})
   const [serverError, setServerError] = useState<string | null>(null)
-  const [withAlternatives, setWithAlternatives] = useState(
-    (initial?.origin_alternatives.length ?? 0) > 0,
-  )
-  const [withExtraDestinations, setWithExtraDestinations] = useState(
-    (initial?.destinations.length ?? 0) > 1,
-  )
+  const [withAlternatives, setWithAlternatives] = useState((source?.origin_alternatives.length ?? 0) > 0)
+  const [withExtraDestinations, setWithExtraDestinations] = useState((source?.destinations.length ?? 0) > 1)
 
   const stepIndex = wizardSteps.indexOf(step)
 
@@ -68,16 +62,17 @@ export function SubscriptionForm({ initial, onDone }: SubscriptionFormProps) {
 
   const saveMutation = useMutation({
     mutationFn: () =>
-      initial
-        ? patchSubscription(initial.id, toPatchPayload(values, initial))
-        : createSubscription(toCreatePayload(values)),
+      edit ? patchSubscription(edit.id, toPatchPayload(values, edit)) : createSubscription(toCreatePayload(values)),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['subscriptions'] })
       onDone()
     },
     onError: (err) => {
       if (err instanceof ApiError && err.fields.length > 0) {
-        setServerError(err.fields.map((f) => `${f.field}: ${f.message}`).join('; '))
+        const { errors: mapped, step: failing, unmapped } = applyServerErrors(err.fields)
+        setErrors(mapped)
+        if (failing) setStep(failing)
+        setServerError(unmapped.length > 0 ? unmapped.join('; ') : null)
       } else {
         setServerError(err instanceof Error ? err.message : 'Request failed')
       }
@@ -96,11 +91,8 @@ export function SubscriptionForm({ initial, onDone }: SubscriptionFormProps) {
   }
 
   const back = () => {
-    if (stepIndex === 0) {
-      onDone()
-      return
-    }
-    setStep(wizardSteps[stepIndex - 1])
+    if (stepIndex === 0) onDone()
+    else setStep(wizardSteps[stepIndex - 1])
   }
 
   const confirm = () => {
@@ -112,15 +104,13 @@ export function SubscriptionForm({ initial, onDone }: SubscriptionFormProps) {
       setStep(failing)
       return
     }
-    if (initial && Object.keys(toPatchPayload(values, initial)).length === 0) {
-      onDone() // nothing changed
+    if (edit && Object.keys(toPatchPayload(values, edit)).length === 0) {
+      onDone()
       return
     }
     saveMutation.mutate()
   }
 
-  // Round-trip toggle: on first enable, prefill the return window starting at
-  // the last departure date.
   const toggleRoundTrip = (on: boolean) => {
     setValues((v) => {
       if (on && v.returnDateFrom === '' && v.dateTo !== '') {
@@ -137,58 +127,68 @@ export function SubscriptionForm({ initial, onDone }: SubscriptionFormProps) {
 
   return (
     <>
-      <div style={{ paddingBottom: 96 }}>
-        <List>
-          <Section>
-            <div style={{ padding: '12px 16px' }}>
-              <Steps count={wizardSteps.length} progress={stepIndex} />
-            </div>
-          </Section>
+      <div className="screen screen--wizard">
+        {/* Labeled step scale — never bare dots. */}
+        <div className="stepscale">
+          <div className="stepscale__head">
+            <span className="stepscale__name">{STEP_NAMES[step]}</span>
+            <span className="stepscale__count">
+              STEP {stepIndex + 1} / {wizardSteps.length}
+            </span>
+          </div>
+          <div className="stepscale__track">
+            {wizardSteps.map((s, i) => (
+              <button
+                key={s}
+                type="button"
+                aria-label={`Go to ${STEP_NAMES[s]}`}
+                className={`stepscale__seg stepscale__seg--btn${i <= stepIndex ? ' stepscale__seg--done' : ''}`}
+                onClick={() => i < stepIndex && setStep(s)}
+                disabled={i > stepIndex}
+              />
+            ))}
+          </div>
+        </div>
 
-          {step === 'from' && (
-            <>
+        {step === 'from' && (
+          <div className="stack">
+            <FieldGroup>
               <AirportPicker
-                header="Where do you fly from?"
+                label="Where do you fly from?"
                 placeholder="City or IATA code"
                 selected={values.origin ? [values.origin] : []}
                 max={1}
                 error={errors.origin}
                 onChange={(codes) => set('origin', codes[0] ?? '')}
               />
-              <Section>
-                <Cell
-                  Component="label"
-                  before={
-                    <Checkbox
-                      checked={withAlternatives}
-                      onChange={(e) => {
-                        setWithAlternatives(e.target.checked)
-                        if (!e.target.checked) set('originAlternatives', [])
-                      }}
-                    />
-                  }
-                  multiline
-                >
-                  Add alternative departure airports
-                </Cell>
-              </Section>
+              <ToggleRow
+                checked={withAlternatives}
+                onChange={(on) => {
+                  setWithAlternatives(on)
+                  if (!on) set('originAlternatives', [])
+                }}
+              >
+                Add alternative departure airports
+              </ToggleRow>
               {withAlternatives && (
                 <AirportPicker
-                  header="Alternative departures"
-                  placeholder="e.g. nearby airports"
+                  label="Alternative departures"
+                  placeholder="Nearby airports"
                   selected={values.originAlternatives}
                   max={5}
                   exclude={values.origin ? [values.origin] : []}
                   onChange={(codes) => set('originAlternatives', codes)}
                 />
               )}
-            </>
-          )}
+            </FieldGroup>
+          </div>
+        )}
 
-          {step === 'to' && (
-            <>
+        {step === 'to' && (
+          <div className="stack">
+            <FieldGroup>
               <AirportPicker
-                header="Where do you fly to?"
+                label="Where do you fly to?"
                 placeholder="City or IATA code"
                 selected={primaryDestination}
                 max={1}
@@ -196,26 +196,18 @@ export function SubscriptionForm({ initial, onDone }: SubscriptionFormProps) {
                 error={errors.destinations}
                 onChange={(codes) => set('destinations', [...codes, ...extraDestinations])}
               />
-              <Section>
-                <Cell
-                  Component="label"
-                  before={
-                    <Checkbox
-                      checked={withExtraDestinations}
-                      onChange={(e) => {
-                        setWithExtraDestinations(e.target.checked)
-                        if (!e.target.checked) set('destinations', primaryDestination)
-                      }}
-                    />
-                  }
-                  multiline
-                >
-                  Add more destinations
-                </Cell>
-              </Section>
+              <ToggleRow
+                checked={withExtraDestinations}
+                onChange={(on) => {
+                  setWithExtraDestinations(on)
+                  if (!on) set('destinations', primaryDestination)
+                }}
+              >
+                Watch more destinations
+              </ToggleRow>
               {withExtraDestinations && (
                 <AirportPicker
-                  header="More destinations"
+                  label="More destinations"
                   placeholder="Watch several cities at once"
                   selected={extraDestinations}
                   max={9}
@@ -223,137 +215,154 @@ export function SubscriptionForm({ initial, onDone }: SubscriptionFormProps) {
                   onChange={(codes) => set('destinations', [...primaryDestination, ...codes])}
                 />
               )}
-            </>
-          )}
+            </FieldGroup>
+          </div>
+        )}
 
-          {step === 'dates' && (
-            <>
-              <Section header="Departure window" footer={errors.dateFrom ?? errors.dateTo}>
-                <Input
-                  header="From"
+        {step === 'dates' && (
+          <div className="stack">
+            <SectionLabel>Departure window</SectionLabel>
+            <FieldGroup>
+              <Field label="Earliest" error={errors.dateFrom}>
+                <input
+                  className={`input input--data${errors.dateFrom ? ' input--error' : ''}`}
                   type="date"
                   min={today}
                   value={values.dateFrom}
-                  status={errors.dateFrom ? 'error' : undefined}
                   onChange={(e) => set('dateFrom', e.target.value)}
                 />
-                <Input
-                  header="To"
+              </Field>
+              <Field label="Latest" error={errors.dateTo}>
+                <input
+                  className={`input input--data${errors.dateTo ? ' input--error' : ''}`}
                   type="date"
                   min={values.dateFrom || today}
                   value={values.dateTo}
-                  status={errors.dateTo ? 'error' : undefined}
                   onChange={(e) => set('dateTo', e.target.value)}
                 />
-              </Section>
-              <Section footer={errors.returnDateFrom ?? errors.returnDateTo}>
-                <Cell
-                  Component="label"
-                  after={<Switch checked={values.roundTrip} onChange={(e) => toggleRoundTrip(e.target.checked)} />}
-                  multiline
-                >
-                  Round trip
-                </Cell>
-                {values.roundTrip && (
-                  <>
-                    <Input
-                      header="Return from"
+              </Field>
+            </FieldGroup>
+            <FieldGroup>
+              <ToggleRow variant="switch" checked={values.roundTrip} onChange={toggleRoundTrip}>
+                Round trip
+              </ToggleRow>
+              {values.roundTrip && (
+                <>
+                  <Field label="Return earliest" error={errors.returnDateFrom}>
+                    <input
+                      className={`input input--data${errors.returnDateFrom ? ' input--error' : ''}`}
                       type="date"
                       min={values.dateFrom || today}
                       value={values.returnDateFrom}
-                      status={errors.returnDateFrom ? 'error' : undefined}
                       onChange={(e) => set('returnDateFrom', e.target.value)}
                     />
-                    <Input
-                      header="Return to"
+                  </Field>
+                  <Field label="Return latest" error={errors.returnDateTo}>
+                    <input
+                      className={`input input--data${errors.returnDateTo ? ' input--error' : ''}`}
                       type="date"
                       min={values.returnDateFrom || values.dateFrom || today}
                       value={values.returnDateTo}
-                      status={errors.returnDateTo ? 'error' : undefined}
                       onChange={(e) => set('returnDateTo', e.target.value)}
                     />
-                  </>
-                )}
-              </Section>
-            </>
-          )}
-
-          {step === 'alert' && (
-            <Section
-              header="When should we alert you?"
-              footer={
-                values.alertStrategy === 'historical_minimum'
-                  ? 'Alerts when the price undercuts the observed minimum. The first days just collect history — no threshold needed.'
-                  : errors.maxPriceEur
-              }
-            >
-              <Select
-                header="Alert type"
-                value={values.alertStrategy}
-                onChange={(e) => set('alertStrategy', e.target.value)}
-              >
-                <option value="absolute_threshold">Below a fixed price</option>
-                <option value="historical_minimum">Significant price drop</option>
-              </Select>
-              {values.alertStrategy === 'absolute_threshold' && (
-                <PriceStepper
-                  value={values.maxPriceEur}
-                  error={errors.maxPriceEur}
-                  onChange={(v) => set('maxPriceEur', v)}
-                />
+                  </Field>
+                </>
               )}
-              <Select header="Max stops" value={values.maxStops} onChange={(e) => set('maxStops', e.target.value)}>
-                <option value="">Any</option>
-                <option value="0">Direct only</option>
-                <option value="1">Up to 1</option>
-                <option value="2">Up to 2</option>
-              </Select>
-            </Section>
-          )}
+            </FieldGroup>
+          </div>
+        )}
 
-          {step === 'summary' && (
-            <>
-              <Section header="Check and confirm">
-                <Cell subtitle="From" multiline>
-                  {values.origin}
-                  {values.originAlternatives.length > 0 && ` (also ${values.originAlternatives.join(', ')})`}
-                </Cell>
-                <Cell subtitle="To" multiline>
-                  {values.destinations.join(', ')}
-                </Cell>
-                <Cell subtitle="Departure" multiline>
+        {step === 'alert' && (
+          <div className="stack">
+            <SectionLabel>When should we alert you?</SectionLabel>
+            <FieldGroup>
+              <Field
+                label="Alert type"
+                help={
+                  values.alertStrategy === 'historical_minimum'
+                    ? 'Alerts when the fare undercuts the route’s own observed low. The first days just collect history — no threshold needed.'
+                    : 'Alerts when the fare drops below a price you set.'
+                }
+              >
+                <select
+                  className="select"
+                  value={values.alertStrategy}
+                  onChange={(e) => set('alertStrategy', e.target.value)}
+                >
+                  <option value="absolute_threshold">Below a fixed price</option>
+                  <option value="historical_minimum">Significant price drop</option>
+                </select>
+              </Field>
+              {values.alertStrategy === 'absolute_threshold' && (
+                <Field label="Alert below (€)" error={errors.maxPriceEur}>
+                  <PriceStepper value={values.maxPriceEur} error={errors.maxPriceEur} onChange={(v) => set('maxPriceEur', v)} />
+                </Field>
+              )}
+              <Field label="Max stops">
+                <select className="select" value={values.maxStops} onChange={(e) => set('maxStops', e.target.value)}>
+                  <option value="">Any</option>
+                  <option value="0">Direct only</option>
+                  <option value="1">Up to 1</option>
+                  <option value="2">Up to 2</option>
+                </select>
+              </Field>
+            </FieldGroup>
+          </div>
+        )}
+
+        {step === 'summary' && (
+          <div className="stack">
+            <SectionLabel>Check and confirm</SectionLabel>
+            <div className="callout">
+              <RouteLine
+                origin={values.origin}
+                originAlternatives={values.originAlternatives}
+                destinations={values.destinations}
+              />
+              <dl style={{ margin: '12px 0 0', display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '6px 16px' }}>
+                <dt className="chart-label">Depart</dt>
+                <dd className="data t-sub" style={{ margin: 0 }}>
                   {values.dateFrom && values.dateTo ? formatDateRange(values.dateFrom, values.dateTo) : '—'}
-                </Cell>
-                <Cell subtitle="Return" multiline>
+                </dd>
+                <dt className="chart-label">Return</dt>
+                <dd className="data t-sub" style={{ margin: 0 }}>
                   {values.roundTrip && values.returnDateFrom && values.returnDateTo
                     ? formatDateRange(values.returnDateFrom, values.returnDateTo)
                     : 'One-way'}
-                </Cell>
-                <Cell subtitle="Alert" multiline>
+                </dd>
+                <dt className="chart-label">Alert</dt>
+                <dd className="data t-sub" style={{ margin: 0 }}>
                   {values.alertStrategy === 'absolute_threshold'
                     ? `Below €${values.maxPriceEur || '—'}`
-                    : 'On significant price drop'}
-                </Cell>
-                <Cell subtitle="Stops" multiline>
+                    : 'On a significant price drop'}
+                </dd>
+                <dt className="chart-label">Stops</dt>
+                <dd className="data t-sub" style={{ margin: 0 }}>
                   {values.maxStops === '' ? 'Any' : values.maxStops === '0' ? 'Direct only' : `Up to ${values.maxStops}`}
-                </Cell>
-              </Section>
-              {serverError && <Banner type="section" header="Could not save" subheader={serverError} />}
-            </>
-          )}
-        </List>
+                </dd>
+              </dl>
+              <p className="await-note">
+                The warden checks several live sources on a schedule and messages you in Telegram when the alert fires.
+                Wizz Air isn’t covered yet.
+              </p>
+            </div>
+            {serverError && (
+              <div className="notice" role="alert">
+                {serverError}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
-      <FixedLayout vertical="bottom" style={{ padding: 16, background: 'var(--tgui--bg_color)' }}>
-        <div style={{ display: 'flex', gap: 12, justifyContent: 'space-between' }}>
-          <Button size="l" mode="bezeled" onClick={back}>
-            {stepIndex === 0 ? 'Cancel' : 'Back'}
-          </Button>
-          <Button size="l" loading={saveMutation.isPending} onClick={next}>
-            {step === 'summary' ? (initial ? 'Save changes' : 'Create') : 'Next'}
-          </Button>
-        </div>
-      </FixedLayout>
+      <div className="actionbar">
+        <Button variant="secondary" onClick={back}>
+          {stepIndex === 0 ? 'Cancel' : 'Back'}
+        </Button>
+        <Button variant="primary" className="btn--advance" disabled={saveMutation.isPending} onClick={next}>
+          {step === 'summary' ? (edit ? 'Save changes' : 'File watch') : 'Next'}
+        </Button>
+      </div>
     </>
   )
 }

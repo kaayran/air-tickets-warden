@@ -14,11 +14,15 @@ export function formatRoute(s: Subscription): string {
   return `${s.origin}${alts} → ${s.destinations.join(', ')}`
 }
 
-// formatDateRange renders "1 Jul – 15 Jul 2030" from YYYY-MM-DD bounds.
+// formatDateRange renders "1 – 15 Jul 2030" from YYYY-MM-DD bounds, and spells
+// out both years when the window crosses New Year ("28 Dec 2030 – 3 Jan 2031").
 export function formatDateRange(from: string, to: string): string {
   const f = new Date(`${from}T00:00:00`)
   const t = new Date(`${to}T00:00:00`)
   const day = (d: Date) => d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+  if (f.getFullYear() !== t.getFullYear()) {
+    return `${day(f)} ${f.getFullYear()} – ${day(t)} ${t.getFullYear()}`
+  }
   return `${day(f)} – ${day(t)} ${t.getFullYear()}`
 }
 

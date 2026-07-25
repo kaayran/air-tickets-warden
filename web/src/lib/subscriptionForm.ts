@@ -66,6 +66,38 @@ export function firstInvalidStep(errors: FormErrors): WizardStep | null {
   return null
 }
 
+// serverFieldMap translates the API's snake_case field names (from a 400
+// response) back onto the form's value keys, so a server-rejected field can be
+// shown inline on its input and the wizard can jump to the offending step.
+const serverFieldMap: Record<string, keyof SubscriptionFormValues> = {
+  origin: 'origin',
+  origin_alternatives: 'originAlternatives',
+  destinations: 'destinations',
+  date_from: 'dateFrom',
+  date_to: 'dateTo',
+  return_date_from: 'returnDateFrom',
+  return_date_to: 'returnDateTo',
+  max_price_minor: 'maxPriceEur',
+  alert_strategy: 'alertStrategy',
+  max_stops: 'maxStops',
+}
+
+// applyServerErrors maps a server field-error list to form errors plus the
+// first wizard step to return the user to. Unmapped fields (ones this form
+// does not expose) fall back to a general message the caller can surface.
+export function applyServerErrors(
+  fields: { field: string; message: string }[],
+): { errors: FormErrors; step: WizardStep | null; unmapped: string[] } {
+  const errors: FormErrors = {}
+  const unmapped: string[] = []
+  for (const f of fields) {
+    const key = serverFieldMap[f.field]
+    if (key) errors[key] = f.message
+    else unmapped.push(`${f.field}: ${f.message}`)
+  }
+  return { errors, step: firstInvalidStep(errors), unmapped }
+}
+
 // todayISO returns the device's current civil date as YYYY-MM-DD.
 export function todayISO(now: Date = new Date()): string {
   const y = now.getFullYear()

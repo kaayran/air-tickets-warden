@@ -1,0 +1,132 @@
+/*
+  DIRECTION CONTRACT — Air Tickets Warden Mini App (seed key 330a04a6, mode operate)
+
+  THESIS: A personal price instrument read like an aeronautical chart — routes as
+  course lines, fares as boxed data callouts against each route's own historical
+  band. It refuses the travel-app default (beach hero, sky-blue gradient, rounded
+  cards) and the telegram-ui gallery look.
+
+  OWN-WORLD: VFR sectional chart + ICAO signage. Paper-or-night ground, hairline
+  chart rules, rectilinear callout boxes with corner ticks, tabular B612 (the
+  Airbus/ENAC cockpit typeface) for every number. Reserved chart inks: magenta =
+  active/alert/primary, blue = structural, amber = caution/paused, green = good.
+  Saturated ink appears only on what matters now.
+
+  STORY: The user sees a chart of their watched routes, understands where each
+  fare sits in its history at a glance, and trusts the one that lights magenta.
+
+  FIRST VIEWPORT: A chart index of callout cards — course-line route header, the
+  current fare in large tabular figures, a low–high price band beneath. Primary
+  action ("File a watch") is a magenta chart button.
+
+  FORM: Aeronautical Chart — grounded direction #6, assigned by the roll. Adopts
+  the dealt tension-commit staging for the destructive delete lever.
+*/
+
+@import '@fontsource/b612/400.css';
+@import '@fontsource/b612/700.css';
+@import '@fontsource/b612-mono/400.css';
+@import '@fontsource/b612-mono/700.css';
+
+:root {
+  /* Reserved chart inks — constant across themes, each carries one meaning. */
+  --chart-magenta: #c42a6b; /* active / triggered / primary action */
+  --chart-magenta-deep: #a01f56;
+  --chart-blue: #35618c;    /* structural / informational */
+  --chart-amber: #b3781a;   /* caution / paused / muted */
+  --chart-green: #2f7d57;   /* good / below target / confirm */
+
+  /* Semantic surfaces & lines — light = chart paper. */
+  --surface: #e9e4d4;          /* chart paper ground */
+  --surface-raised: #f4f1e7;   /* callout fill */
+  --surface-sunk: #ded8c4;     /* wells, inset scales */
+  --ink: #1b2530;              /* primary chart ink */
+  --ink-muted: #55606d;        /* secondary data / labels */
+  --ink-faint: #877f6a;        /* faint captions on paper */
+  --rule: #b9b199;             /* hairline chart rule */
+  --rule-strong: #6f6a58;      /* section / frame rule */
+  --magenta-wash: rgba(196, 42, 107, 0.10); /* triggered callout tint */
+  --amber-wash: rgba(179, 120, 26, 0.12);
+  --focus-ring: rgba(53, 97, 140, 0.55);
+
+  /* Rectilinear form language — charts are drawn, not rounded. */
+  --edge: 2px;         /* callout corners */
+  --edge-chip: 2px;
+  --hair: 1px;
+  --frame: 1.5px;
+
+  /* Spacing scale. */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
+
+  --font-data: 'B612 Mono', ui-monospace, 'SFMono-Regular', monospace;
+  --font-ui: 'B612', system-ui, -apple-system, sans-serif;
+
+  /* Authored 6-step type scale — the only sizes the UI uses. */
+  --fs-display: 26px; /* the fare figure */
+  --fs-title: 22px;   /* screen title */
+  --fs-lead: 18px;    /* route codes, step name */
+  --fs-base: 15px;    /* body, inputs, buttons */
+  --fs-sub: 13px;     /* secondary data, field labels, captions, help */
+  --fs-micro: 11px;   /* mono uppercase chart label */
+
+  --ease-chart: cubic-bezier(0.16, 1, 0.3, 1);
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Night = backlit electronic flight bag chart. */
+    --surface: #0f161b;
+    --surface-raised: #16212a;
+    --surface-sunk: #0a1015;
+    --ink: #cbd5db;
+    --ink-muted: #8794a0;
+    --ink-faint: #5f6d78;
+    --rule: #2b3a45;
+    --rule-strong: #3f5461;
+    --chart-magenta: #e0508a;      /* lifts for legibility on night ground */
+    --chart-magenta-deep: #c93b74;
+    --chart-blue: #6ea3d6;
+    --chart-amber: #d9a13f;
+    --chart-green: #56b083;
+    --magenta-wash: rgba(224, 80, 138, 0.14);
+    --amber-wash: rgba(217, 161, 63, 0.14);
+    --focus-ring: rgba(110, 163, 214, 0.6);
+  }
+}
+
+/* Impose the chart ground and cockpit type over telegram-ui defaults. */
+body {
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* All measured values — prices, dates, IATA, band scales — are tabular. */
+.data {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+
+/* Section eyebrow in ICAO signage register: one system-wide label style. */
+.chart-label {
+  font-family: var(--font-data);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+*:focus-visible {
+  outline: var(--frame) solid var(--focus-ring);
+  outline-offset: 2px;
+}

@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Button, Input, List, Placeholder, Section, Spinner } from '@telegram-apps/telegram-ui'
 import { fetchMe, patchMe, type UserSettings } from '../api'
+import { Button, Field, FieldGroup, Masthead, Screen, SectionLabel } from '../components/chart/ui'
 
-// numeric form state: '' means "unset — use the default from the cascade".
+// numeric form state: '' means "unset — use the service default".
 interface SettingsValues {
   cooldown_hours: string
   drop_pct: string // whole percent in the UI; ratio on the wire
@@ -18,8 +18,8 @@ function fromSettings(s: UserSettings): SettingsValues {
   }
 }
 
-// toPatch diffs the edited values against the loaded settings: only changed
-// keys go on the wire; '' maps to null (clear back to the env default).
+// toPatch diffs edited values against the loaded settings: only changed keys go
+// on the wire; '' maps to null (clear back to the service default).
 function toPatch(v: SettingsValues, orig: SettingsValues): Record<string, number | null> {
   const patch: Record<string, number | null> = {}
   if (v.cooldown_hours !== orig.cooldown_hours) {
@@ -34,9 +34,10 @@ function toPatch(v: SettingsValues, orig: SettingsValues): Record<string, number
   return patch
 }
 
-// SettingsScreen edits the per-user alert defaults over GET/PATCH /me. These
-// sit in the middle of the cascade: a subscription-level value wins over
-// them, and clearing one falls back to the service default.
+// SettingsScreen edits the per-user alert defaults over GET/PATCH /me. These sit
+// in the middle of the cascade (a per-watch value wins over them); clearing one
+// falls back to the service default. Each control explains what it governs — the
+// anti-spam story made legible.
 export function SettingsScreen() {
   const queryClient = useQueryClient()
   const { data, error, isLoading } = useQuery({ queryKey: ['me'], queryFn: fetchMe })
@@ -53,79 +54,80 @@ export function SettingsScreen() {
     onError: (err) => setSaveError(err instanceof Error ? err.message : 'Request failed'),
   })
 
-  if (isLoading) {
-    return (
-      <Placeholder>
-        <Spinner size="l" />
-      </Placeholder>
-    )
-  }
+  if (isLoading) return <div className="state-msg">Loading settings…</div>
   if (error || !data) {
-    return (
-      <Placeholder
-        header="Could not load settings"
-        description={error instanceof Error ? error.message : 'Unknown error'}
-      />
-    )
+    return <div className="state-msg">{error instanceof Error ? error.message : 'Could not load settings.'}</div>
   }
 
   const original = fromSettings(data)
   const values = edited ?? original
-  const set = (key: keyof SettingsValues, value: string) =>
-    setEdited({ ...values, [key]: value })
+  const set = (key: keyof SettingsValues, value: string) => setEdited({ ...values, [key]: value })
   const patch = toPatch(values, original)
   const dirty = Object.keys(patch).length > 0
 
   return (
-    <List>
-      <Section
-        header="Alert defaults"
-        footer="Empty fields fall back to the service defaults. A per-subscription value always wins over these."
-      >
-        <Input
-          header="Cooldown between alerts (hours)"
-          type="number"
-          inputMode="numeric"
-          min={0}
-          placeholder="service default"
-          value={values.cooldown_hours}
-          onChange={(e) => set('cooldown_hours', e.target.value)}
-        />
-        <Input
-          header="Price drop worth alerting (%)"
-          type="number"
-          inputMode="numeric"
-          min={1}
-          max={99}
-          placeholder="service default"
-          value={values.drop_pct}
-          onChange={(e) => set('drop_pct', e.target.value)}
-        />
-        <Input
-          header="Stable-price band (%)"
-          type="number"
-          inputMode="numeric"
-          min={0}
-          max={99}
-          placeholder="service default"
-          value={values.stable_price_band_pct}
-          onChange={(e) => set('stable_price_band_pct', e.target.value)}
-        />
-      </Section>
-      {saveError && <Section footer={saveError} />}
-      <Section footer={`Signed in as chat ${data.chat_id}`}>
-        <div style={{ padding: 16 }}>
-          <Button
-            size="l"
-            stretched
-            disabled={!dirty}
-            loading={saveMutation.isPending}
-            onClick={() => saveMutation.mutate(patch)}
-          >
-            Save
-          </Button>
+    <Screen>
+      <Masthead title="Settings" />
+      <SectionLabel>Alert defaults</SectionLabel>
+      <FieldGroup>
+        <Field
+          label="Quiet period between alerts (hours)"
+          help="After an alert on a route, how long to wait before alerting on it again. Higher means fewer messages."
+        >
+          <input
+            className="input input--data"
+            type="number"
+            inputMode="numeric"
+            min={0}
+            placeholder="service default"
+            value={values.cooldown_hours}
+            onChange={(e) => set('cooldown_hours', e.target.value)}
+          />
+        </Field>
+        <Field
+          label="Drop worth alerting (%)"
+          help="How far a fare must fall against its history before it counts as a real drop. Higher means only bigger drops alert."
+        >
+          <input
+            className="input input--data"
+            type="number"
+            inputMode="numeric"
+            min={1}
+            max={99}
+            placeholder="service default"
+            value={values.drop_pct}
+            onChange={(e) => set('drop_pct', e.target.value)}
+          />
+        </Field>
+        <Field
+          label="Ignore wobble within (%)"
+          help="Small price moves inside this band are treated as noise, not a drop — this is what keeps repeat alerts quiet."
+        >
+          <input
+            className="input input--data"
+            type="number"
+            inputMode="numeric"
+            min={0}
+            max={99}
+            placeholder="service default"
+            value={values.stable_price_band_pct}
+            onChange={(e) => set('stable_price_band_pct', e.target.value)}
+          />
+        </Field>
+      </FieldGroup>
+      <p className="await-note">
+        Empty fields fall back to the service defaults. A per-watch value always wins over these.
+      </p>
+      {saveError && (
+        <div className="notice" style={{ marginTop: 12 }} role="alert">
+          {saveError}
         </div>
-      </Section>
-    </List>
+      )}
+      <div style={{ marginTop: 16 }}>
+        <Button variant="primary" block disabled={!dirty || saveMutation.isPending} onClick={() => saveMutation.mutate(patch)}>
+          Save
+        </Button>
+      </div>
+    </Screen>
   )
 }

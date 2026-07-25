@@ -1,6 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Cell, Chip, Input, Section } from '@telegram-apps/telegram-ui'
 import { searchAirports } from '../api'
 
 // useDebounced delays the autocomplete query so we don't hit the API on every
@@ -15,7 +14,7 @@ function useDebounced(value: string, ms: number): string {
 }
 
 export interface AirportPickerProps {
-  header: string
+  label: string
   placeholder: string
   selected: string[]
   max: number
@@ -25,13 +24,15 @@ export interface AirportPickerProps {
   onChange: (next: string[]) => void
 }
 
-// AirportPicker is the IATA autocomplete: selected codes render as removable
-// chips. On focus with an empty field it shows the browse list (major hubs,
-// city-alphabetical); searching starts from the first character.
-export function AirportPicker({ header, placeholder, selected, max, exclude = [], error, onChange }: AirportPickerProps) {
+// AirportPicker is the IATA autocomplete in chart grammar: selected codes render
+// as removable chips; focusing an empty field shows the browse list; searching
+// starts from the first character. Exposes ARIA combobox/listbox roles so a
+// screen reader announces the suggestions.
+export function AirportPicker({ label, placeholder, selected, max, exclude = [], error, onChange }: AirportPickerProps) {
   const [query, setQuery] = useState('')
   const [focused, setFocused] = useState(false)
   const debouncedQuery = useDebounced(query.trim(), 250)
+  const listId = useId()
 
   const { data: hits } = useQuery({
     queryKey: ['airports', debouncedQuery],
@@ -42,46 +43,78 @@ export function AirportPicker({ header, placeholder, selected, max, exclude = []
 
   const suggestions = (hits ?? []).filter((h) => !selected.includes(h.iata) && !exclude.includes(h.iata))
   const atCapacity = selected.length >= max
+  const showList = focused && !atCapacity
+  const noMatches = showList && query.trim().length > 0 && suggestions.length === 0
 
   return (
-    <Section header={header} footer={error}>
+    <div className="field">
+      <span className="field__label">{label}</span>
       {selected.length > 0 && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '8px 16px' }}>
+        <div className="chips">
           {selected.map((code) => (
-            <Chip key={code} mode="mono" after="×" onClick={() => onChange(selected.filter((c) => c !== code))}>
-              {code}
-            </Chip>
+            <button
+              type="button"
+              key={code}
+              className="chip"
+              onClick={() => onChange(selected.filter((c) => c !== code))}
+              aria-label={`Remove ${code}`}
+            >
+              <span className="data">{code}</span>
+              <span className="chip__x" aria-hidden="true">
+                ×
+              </span>
+            </button>
           ))}
         </div>
       )}
       {!atCapacity && (
-        <Input
+        <input
+          className={`input${error ? ' input--error' : ''}`}
+          type="text"
+          role="combobox"
+          aria-expanded={showList}
+          aria-controls={listId}
+          aria-autocomplete="list"
           placeholder={placeholder}
           value={query}
-          status={error ? 'error' : undefined}
-          autoCapitalize="none"
+          autoCapitalize="characters"
           autoCorrect="off"
           onChange={(e) => setQuery(e.target.value)}
           onFocus={() => setFocused(true)}
-          // Delay so a tap on a suggestion row lands before the list hides.
+          // Delay so a tap on a suggestion lands before the list hides.
           onBlur={() => setTimeout(() => setFocused(false), 150)}
         />
       )}
-      {!atCapacity &&
-        focused &&
-        suggestions.map((h) => (
-          <Cell
-            key={h.iata}
-            subtitle={`${h.name} · ${h.country}`}
-            after={h.iata}
-            onClick={() => {
-              onChange([...selected, h.iata])
-              setQuery('')
-            }}
-          >
-            {h.city || h.name}
-          </Cell>
-        ))}
-    </Section>
+      {showList && (suggestions.length > 0 || noMatches) && (
+        <div className="suggestions" role="listbox" id={listId}>
+          {noMatches ? (
+            <div className="suggestion__empty">No airport matches “{query.trim()}”.</div>
+          ) : (
+            suggestions.map((h) => (
+              <button
+                type="button"
+                key={h.iata}
+                className="suggestion"
+                role="option"
+                aria-selected="false"
+                onClick={() => {
+                  onChange([...selected, h.iata])
+                  setQuery('')
+                }}
+              >
+                <span>
+                  <span className="suggestion__place">{h.city || h.name}</span>{' '}
+                  <span className="suggestion__sub">
+                    {h.name} · {h.country}
+                  </span>
+                </span>
+                <span className="suggestion__code">{h.iata}</span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+      {error && <div className="field__error">{error}</div>}
+    </div>
   )
 }
