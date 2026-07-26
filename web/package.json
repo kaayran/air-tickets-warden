@@ -6,7 +6,7 @@
   "scripts": {
     "test": "vitest run --passWithNoTests",
     "dev": "vite",
-    "build": "tsc --noEmit && vite build && touch dist/.gitkeep",
+    "build": "tsc --noEmit && vite build && node -e \"require('fs').writeFileSync('dist/.gitkeep','')\"",
     "preview": "vite preview",
     "lint": "eslint ."
   },
