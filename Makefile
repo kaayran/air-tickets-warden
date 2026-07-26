@@ -13,7 +13,7 @@ run: ## Run the service (needs Postgres up and PUBLIC_URL set)
 	go run ./cmd/warden run
 
 dev: ## One command: Postgres + cloudflared tunnel + app (for the phone test)
-	./scripts/dev.sh
+	bash scripts/dev.sh
 
 test: ## Run Go + web tests
 	go test -short ./...
