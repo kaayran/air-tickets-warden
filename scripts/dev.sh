@@ -19,9 +19,17 @@ echo "==> Building Mini App (web/dist)"
 
 echo "==> Opening cloudflared quick tunnel"
 TUNNEL_LOG="$(mktemp)"
-cloudflared tunnel --url http://localhost:8080 >"$TUNNEL_LOG" 2>&1 &
+# Force an empty config: cloudflared merges ~/.cloudflared/config.yml even for a
+# quick tunnel, and its `ingress` rules outrank --url. A config left there by an
+# unrelated project answers our tunnel hostname with its own catch-all (typically
+# `http_status:404`), so the app is up and reachable locally yet 404s through the
+# tunnel — an expensive thing to debug. An empty config keeps --url authoritative.
+TUNNEL_CFG_DIR="$(mktemp -d)"
+TUNNEL_CFG="$TUNNEL_CFG_DIR/empty.yml"
+: >"$TUNNEL_CFG"
+cloudflared --config "$TUNNEL_CFG" tunnel --url http://localhost:8080 >"$TUNNEL_LOG" 2>&1 &
 CF_PID=$!
-trap 'kill "$CF_PID" 2>/dev/null || true' EXIT
+trap 'kill "$CF_PID" 2>/dev/null || true; rm -rf "$TUNNEL_CFG_DIR"' EXIT
 
 PUBLIC_URL=""
 for _ in $(seq 1 30); do
